@@ -100,6 +100,55 @@ export function makeFixturePdf({
   return concatenate(parts);
 }
 
+/** Small reading fixture with portrait, landscape, then portrait letter pages. */
+export function makeReadingFixturePdf() {
+  const dimensions = [[612, 792], [792, 612], [612, 792]];
+  const objects = new Map([
+    [1, ascii("<< /Type /Catalog /Pages 2 0 R >>")],
+    [2, ascii("<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 /Resources << /Font << /F1 9 0 R >> >> >>")],
+  ]);
+  dimensions.forEach(([width, height], index) => {
+    const pageObject = 3 + index * 2;
+    objects.set(pageObject, ascii(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Contents ${pageObject + 1} 0 R >>`));
+    const lines = [
+      `Reading preview - page ${index + 1}`,
+      "",
+      "This page uses twelve-point Helvetica at ordinary document size.",
+      "The preview should preserve readable type when selecting 100 percent.",
+      "Scroll to read the remaining lines without shrinking the entire page.",
+      "",
+      ...Array.from({ length: 20 }, (_, line) => `Paragraph ${line + 1}: A fixed reading area keeps navigation steady.`),
+    ];
+    const content = [
+      "0 0 0 rg",
+      `BT /F1 12 Tf 18 TL 48 ${height - 60} Td`,
+      ...lines.flatMap((line, lineIndex) => [lineIndex ? "T*" : "", `(${line}) Tj`]),
+      "ET",
+      `BT /F1 12 Tf 48 36 Td (End of page ${index + 1}) Tj ET`,
+      "",
+    ].join("\n");
+    objects.set(pageObject + 1, streamObject(ascii(content)));
+  });
+  objects.set(9, ascii("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"));
+
+  const parts = [ascii("%PDF-1.4\n% Mixed page sizes for preview regression checks\n")];
+  const offsets = [0];
+  let byteOffset = parts[0].byteLength;
+  for (const [number, body] of objects) {
+    offsets[number] = byteOffset;
+    const object = concatenate([ascii(`${number} 0 obj\n`), body, ascii("\nendobj\n")]);
+    parts.push(object);
+    byteOffset += object.byteLength;
+  }
+  const xref = ["xref\n0 10\n0000000000 65535 f \n"];
+  for (let number = 1; number <= 9; number += 1) {
+    xref.push(`${String(offsets[number]).padStart(10, "0")} 00000 n \n`);
+  }
+  xref.push(`trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n${byteOffset}\n%%EOF\n`);
+  parts.push(ascii(xref.join("")));
+  return concatenate(parts);
+}
+
 /**
  * Append a valid incremental revision with an /Info object and a /Prev chain.
  * The pages are unchanged, but startup must still find the active xref/trailer.

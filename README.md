@@ -18,11 +18,11 @@ Set `PORT` for another port. The default host is loopback; browser workers and W
 ## Debug a PDF
 
 1. Select PDFs, drag them into the page, or choose **Load sample PDF** to try the three-page range-index fixture. Set the chunk size before importing. Duplicate bytes reuse the existing document; changing its chunk size requires deleting it first.
-2. Select a document and page. **Download** reconstructs the original PDF from its SQLite chunks in the browser.
+2. Select a document and page. Choose **Expand preview** for a larger reading window, then **100%**, **150%**, or **200%** zoom for readable text; **Fit page** shows the whole page. The preview viewport keeps its size while pages load, and zoom is retained as you navigate. **Download** reconstructs the original PDF from its SQLite chunks in the browser.
 3. Choose **Trace page** or **Trace all pages**. Each page uses a fresh PDF.js loading task with byte ranges read from SQLite WASM. Completed traces publish a manifest and display the chunks actually observed, including bootstrap dependencies.
 4. Choose **Verify replay**. A fresh browser renderer is allowed to read only the recorded chunks and must produce the same pixel hash. Browser manifests use a distinct rendering profile from the optional Node CLI; they are observations for that profile, not universal PDF dependencies.
 5. Open **Page manifests** to inspect traces and combine the deduplicated ranges for selected pages. Enter `1, 3` or `1-3`; ranges are half-open `[start, end)`.
-6. Use **SQL console** for read-only SQL, query presets, and CSV export. **Database schema** shows live tables and row counts. **Activity log** records operations in this tab.
+6. Use **SQL console** for read-only SQL, query presets, and CSV export. Expand **Database schema** in the console for live tables, columns, constraints, and row counts while writing queries. **Activity log** records operations in this tab.
 
 ## Memory and query behavior
 

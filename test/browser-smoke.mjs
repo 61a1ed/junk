@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createDebugServer } from '../server.mjs';
-import { makeIncrementalFixturePdf } from './fixture.mjs';
+import { makeIncrementalFixturePdf, makeReadingFixturePdf } from './fixture.mjs';
 
 const playwright = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const { server } = createDebugServer();
@@ -38,6 +38,9 @@ await page.addInitScript(() => {
   window.__heldRangeCalls = [];
   window.__holdPdfTermination = false;
   window.__heldPdfTerminations = [];
+  window.__holdPreviewPages = false;
+  window.__heldPreviewPages = [];
+  window.__pendingPreviewReplies = 0;
   Worker.prototype.postMessage = function (message, ...args) {
     if (window.__holdRanges && message?.action === 'ranges') {
       window.__heldRangeCalls.push(() => postMessage.call(this, message, ...args));
@@ -45,6 +48,19 @@ await page.addInitScript(() => {
     }
     if (window.__holdPdfTermination && message?.action === 'Terminate') {
       window.__heldPdfTerminations.push(() => postMessage.call(this, message, ...args));
+      return;
+    }
+    if (window.__holdPreviewPages && message?.action === 'GetPage') {
+      window.__heldPreviewPages.push(() => {
+        ++window.__pendingPreviewReplies;
+        const receive = event => {
+          if (event.data?.callbackId !== message.callbackId || event.data?.sourceName !== message.targetName) return;
+          this.removeEventListener('message', receive);
+          --window.__pendingPreviewReplies;
+        };
+        this.addEventListener('message', receive);
+        postMessage.call(this, message, ...args);
+      });
       return;
     }
     return postMessage.call(this, message, ...args);
@@ -57,11 +73,37 @@ await page.addInitScript(() => {
     window.__holdPdfTermination = false;
     for (const send of window.__heldPdfTerminations.splice(0)) send();
   };
+  window.__releasePreviewPages = () => {
+    window.__holdPreviewPages = false;
+    for (const send of window.__heldPreviewPages.splice(0)) send();
+  };
 });
 const visible = async selector => page.locator(selector).first().waitFor({ state: 'visible' });
 const notice = async text => page.waitForFunction(text => document.querySelector('#notice')?.textContent.includes(text), text);
 const mutationComplete = async () => page.waitForFunction(() => !document.querySelector('#upload-button').disabled);
 const queryComplete = async () => page.waitForFunction(() => !document.querySelector('#run-query').disabled);
+const previewComplete = async number => page.waitForFunction(number => {
+  const frame = document.querySelector('#preview-frame');
+  return frame?.getAttribute('aria-busy') === 'false' && frame.querySelector(`canvas[aria-label="PDF preview, page ${number}"]`);
+}, number);
+const previewGeometry = () => page.locator('#preview-frame').evaluate(frame => {
+  const bounds = frame.getBoundingClientRect();
+  return { width: bounds.width, height: bounds.height,
+    followingOffset: document.querySelector('.preview-description').getBoundingClientRect().top - bounds.top };
+});
+const sameGeometry = (actual, expected) => {
+  for (const key of Object.keys(expected)) {
+    assert.ok(Math.abs(actual[key] - expected[key]) < 1, `Preview ${key} changed: ${JSON.stringify({actual, expected})}`);
+  }
+};
+const canvasSize = () => page.locator('#preview-frame canvas').evaluate(canvas => {
+  const { width, height } = canvas.getBoundingClientRect();
+  return { width, height };
+});
+const noPageOverflow = async () => {
+  const geometry = await page.evaluate(() => ({scroll:document.documentElement.scrollWidth, width:innerWidth}));
+  assert.ok(geometry.scroll <= geometry.width + 1, `Page overflow: ${JSON.stringify(geometry)}`);
+};
 const step = label => console.log(`PASS ${label}`);
 try {
   await page.goto(origin);
@@ -155,7 +197,7 @@ try {
   assert.deepEqual(errors, []);
   step('late worker range result cannot update a replaced inspector');
 
-  await page.locator('[data-view="query"]').click();
+  await page.locator('.nav-item[data-view="query"]').click();
   await page.getByRole('textbox', { name: 'SQL query' }).fill('SELECT count(*) AS count FROM documents');
   await page.getByRole('button', { name: 'Run query' }).click();
   await queryComplete();
@@ -186,12 +228,31 @@ try {
   assert.equal((await page.locator('#query-results tbody td').textContent()).trim(), '1');
   step('expensive SQL times out without blocking or mutating the live database');
 
-  await page.locator('.nav-item[data-view="schema"]').click();
+  assert.equal(await page.locator('.nav-item[data-view="schema"]').count(), 0);
+  assert.equal(await page.locator('#schema-reference').evaluate(details => details.open), false);
+  await page.locator('#schema-reference > summary').click();
   await visible('.schema-card');
+  assert.equal(await page.getByRole('textbox', { name: 'SQL query' }).isVisible(), true);
   assert.equal(await page.locator('.schema-card').count(), 6);
   await page.getByText('View CREATE TABLE statement', { exact: true }).first().click();
   assert.match(await page.locator('.schema-card details').first().textContent(), /CREATE TABLE/);
-  step('live schema and table definitions');
+  await page.locator('#schema-reference > summary').click();
+  assert.equal(await page.locator('.schema-card').first().isVisible(), false);
+  assert.equal(await page.getByRole('textbox', { name: 'SQL query' }).isVisible(), true);
+  step('schema expands and collapses within the SQL console');
+
+  await page.locator('.nav-item[data-view="documents"]').click();
+  await page.getByRole('link', {name:'Explore the schema'}).click();
+  await visible('.schema-card');
+  assert.equal(await page.locator('#schema-reference').evaluate(details => details.open), true);
+  assert.equal(await page.getByRole('textbox', {name:'SQL query'}).isVisible(), true);
+  await page.screenshot({path:'/tmp/pdf-workbench-schema.png', fullPage:true});
+  await page.locator('#schema-reference > summary').click();
+  await page.evaluate(() => { location.hash = 'schema'; });
+  await page.waitForFunction(() => location.hash === '#query' && document.querySelector('#schema-reference').open);
+  assert.equal(await page.getByRole('textbox', {name:'SQL query'}).isVisible(), true);
+  await page.locator('#schema-reference > summary').click();
+  step('Explore the schema and legacy schema links open the SQL reference');
 
   await page.locator('.nav-item[data-view="documents"]').click();
   await page.getByRole('tab', { name: 'Overview', exact: true }).click();
@@ -203,6 +264,118 @@ try {
   await page.getByRole('spinbutton', { name: 'Page number' }).press('Tab');
   await page.locator('canvas[aria-label="PDF preview, page 3"]').waitFor();
   step('page navigation and rerender');
+
+  await page.locator('#file-input').setInputFiles({name:'reading.pdf', mimeType:'application/pdf', buffer:Buffer.from(makeReadingFixturePdf())});
+  await notice('ready to inspect');
+  await mutationComplete();
+  await previewComplete(1);
+  await page.getByRole('combobox', {name:'Preview zoom'}).selectOption('1');
+  await previewComplete(1);
+  sameGeometry(await canvasSize(), {width:816, height:1056});
+  await page.getByRole('combobox', {name:'Preview zoom'}).selectOption('fit');
+  await previewComplete(1);
+  const initialPreview = await previewGeometry();
+  await page.evaluate(() => { window.__holdPreviewPages = true; });
+  await page.getByRole('button', {name:'Next page', exact:true}).click();
+  await page.waitForFunction(() => window.__heldPreviewPages.length === 1);
+  assert.equal(await page.locator('#preview-frame').getAttribute('aria-busy'), 'true');
+  assert.equal(await page.locator('canvas[aria-label="PDF preview, page 1"]').count(), 1);
+  sameGeometry(await previewGeometry(), initialPreview);
+  // The pending page must not be fitted against a hidden, zero-width frame.
+  await page.locator('.nav-item[data-view="query"]').click();
+  await page.evaluate(() => window.__releasePreviewPages());
+  await page.waitForFunction(() => window.__pendingPreviewReplies === 0);
+  await page.locator('.nav-item[data-view="documents"]').click();
+  await previewComplete(2);
+  sameGeometry(await previewGeometry(), initialPreview);
+  const fittedSize = await canvasSize();
+  assert.ok(fittedSize.width > 200 && fittedSize.height > 150, `Returned preview is too small: ${JSON.stringify(fittedSize)}`);
+  assert.ok(fittedSize.width < initialPreview.width && fittedSize.height < initialPreview.height, 'Fit page must fit inside the visible frame');
+  assert.ok(Math.abs(fittedSize.width / fittedSize.height - 792 / 612) < 0.01, 'Returned preview must retain the page aspect ratio');
+  assert.equal(await page.getByRole('combobox', {name:'Preview zoom'}).inputValue(), 'fit');
+  step('returning from SQL after a delayed page load refits the visible preview');
+  await page.getByRole('combobox', {name:'Preview zoom'}).selectOption('1');
+  await previewComplete(2);
+  sameGeometry(await previewGeometry(), initialPreview);
+  sameGeometry(await canvasSize(), {width:1056, height:816});
+  assert.equal(await page.getByRole('combobox', {name:'Preview zoom'}).inputValue(), '1');
+  step('portrait-to-landscape navigation keeps the viewport stable while loading and preserves readable zoom');
+
+  // Let an uncached page reply arrive after the user has already gone back.
+  await page.evaluate(() => { window.__holdPreviewPages = true; });
+  await page.getByRole('button', {name:'Next page', exact:true}).click();
+  await page.waitForFunction(() => window.__heldPreviewPages.length === 1);
+  await page.getByRole('button', {name:'Previous page', exact:true}).click();
+  await previewComplete(2);
+  await page.evaluate(() => window.__releasePreviewPages());
+  await page.waitForFunction(() => window.__pendingPreviewReplies === 0);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.getByRole('spinbutton', {name:'Page number'}).inputValue(), '2');
+  assert.equal(await page.locator('canvas[aria-label="PDF preview, page 2"]').count(), 1);
+  await page.getByRole('button', {name:'Next page', exact:true}).click();
+  await previewComplete(3);
+  sameGeometry(await previewGeometry(), initialPreview);
+  sameGeometry(await canvasSize(), {width:816, height:1056});
+  step('rapid page navigation ignores a late response for an abandoned page');
+
+  await page.getByRole('button', {name:'Expand preview', exact:true}).click();
+  await visible('#preview-dialog[open]');
+  await previewComplete(3);
+  assert.ok((await page.locator('#preview-frame').boundingBox()).height > initialPreview.height);
+  sameGeometry(await canvasSize(), {width:816, height:1056});
+  await page.screenshot({path:'/tmp/pdf-workbench-reader.png', fullPage:true});
+  await page.getByRole('button', {name:'Previous page', exact:true}).click();
+  await previewComplete(2);
+  await page.getByRole('button', {name:'Close preview', exact:true}).click();
+  await page.locator('#preview-dialog').waitFor({state:'hidden'});
+  await previewComplete(2);
+  sameGeometry(await previewGeometry(), initialPreview);
+  assert.equal(await page.getByRole('combobox', {name:'Preview zoom'}).inputValue(), '1');
+  await page.getByRole('button', {name:'Expand preview', exact:true}).click();
+  await visible('#preview-dialog[open]');
+  await page.getByRole('combobox', {name:'Preview zoom'}).selectOption('1.5');
+  await previewComplete(2);
+  sameGeometry(await canvasSize(), {width:1584, height:1224});
+  await page.keyboard.press('Escape');
+  await page.locator('#preview-dialog').waitFor({state:'hidden'});
+  await previewComplete(2);
+  assert.equal(await page.getByRole('spinbutton', {name:'Page number'}).inputValue(), '2');
+  assert.equal(await page.getByRole('combobox', {name:'Preview zoom'}).inputValue(), '1.5');
+  step('expanded preview and Escape preserve the current page and zoom');
+
+  await page.setViewportSize({width:390,height:844});
+  await page.getByRole('combobox', {name:'Preview zoom'}).selectOption('1');
+  await previewComplete(2);
+  sameGeometry(await canvasSize(), {width:1056, height:816});
+  await noPageOverflow();
+  await page.locator('#preview-frame').evaluate(frame => { frame.scrollLeft = 0; frame.scrollTop = 0; });
+  const startEdges = await page.locator('#preview-frame').evaluate(frame => {
+    const outer = frame.getBoundingClientRect(), canvas = frame.querySelector('canvas').getBoundingClientRect();
+    return {left:canvas.left - outer.left, top:canvas.top - outer.top,
+      horizontal:frame.scrollWidth > frame.clientWidth, vertical:frame.scrollHeight > frame.clientHeight};
+  });
+  assert.ok(startEdges.horizontal && startEdges.vertical, 'Readable preview must scroll within its frame');
+  assert.ok(startEdges.left >= 0 && startEdges.top >= 0, 'The start of an oversized page must remain reachable');
+  await page.locator('#preview-frame').evaluate(frame => { frame.scrollLeft = frame.scrollWidth; frame.scrollTop = frame.scrollHeight; });
+  const endEdges = await page.locator('#preview-frame').evaluate(frame => {
+    const outer = frame.getBoundingClientRect(), canvas = frame.querySelector('canvas').getBoundingClientRect();
+    return {right:canvas.right - outer.right, bottom:canvas.bottom - outer.bottom};
+  });
+  assert.ok(endEdges.right <= 1 && endEdges.bottom <= 1, 'The end of an oversized page must remain reachable');
+  await page.getByRole('button', {name:'Expand preview', exact:true}).click();
+  await previewComplete(2);
+  await noPageOverflow();
+  await page.keyboard.press('Escape');
+  await page.locator('#preview-dialog').waitFor({state:'hidden'});
+  await page.setViewportSize({width:1440,height:1060});
+  await page.getByRole('combobox', {name:'Preview zoom'}).selectOption('fit');
+  await previewComplete(2);
+  await page.getByRole('button', {name:'Delete document', exact:true}).click();
+  await page.getByRole('button', {name:'Delete PDF', exact:true}).click();
+  await notice('PDF deleted');
+  await mutationComplete();
+  assert.equal(await page.locator('#stat-documents').textContent(), '1');
+  step('mobile readable preview scrolls without overflowing the page');
 
   await page.locator('#file-input').setInputFiles({name: 'duplicate.pdf', mimeType:'application/pdf', buffer:Buffer.from(sample)});
   await notice('ready to inspect');
@@ -260,6 +433,10 @@ try {
   };
   await page.route('**/query-worker.js', queryRoute);
   await page.locator('.nav-item[data-view="query"]').click();
+  await page.locator('#schema-reference > summary').click();
+  await visible('.schema-card');
+  const documentsSchema = page.locator('.schema-card').filter({has:page.getByRole('heading', {name:'documents', exact:true})});
+  assert.equal(await documentsSchema.locator('.count-pill').textContent(), '1 rows');
   await page.getByRole('textbox', {name:'SQL query'}).fill('SELECT count(*) FROM documents');
   await page.getByRole('button', {name:'Run query'}).click();
   await queryReady.promise;
@@ -273,6 +450,8 @@ try {
   assert.match(await page.locator('#query-results').textContent(), /Session reset/);
   assert.equal(await page.locator('#result-count').textContent(), '—');
   assert.equal(await page.locator('#export-csv').isDisabled(), true);
+  await page.waitForFunction(() => [...document.querySelectorAll('.schema-card')].some(card =>
+    card.querySelector('h2')?.textContent === 'documents' && card.querySelector('.count-pill')?.textContent === '0 rows'));
   await page.unroute('**/query-worker.js', queryRoute);
   step('delete cascading records and full session reset');
   step('late SQL response cannot restore results after a reset');

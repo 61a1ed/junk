@@ -12,6 +12,7 @@ const bytes = value => {
 let state = { documents: [], stats: {}, profile: {} }, selectedId = null, detail = null, page = 1, inspectorTab = 'overview', currentView = 'documents';
 let pending = false, queryPending = false, queryGeneration = 0, logs = [], queryResult = null, verified = new Map();
 let pdfjs, previewTask, previewDoc, previewId, renderTask, previewGeneration = 0, detailGeneration = 0;
+let previewZoom = 'fit', previewSize = '', previewResizeTimer, previewInlineHeight = 0;
 const presets = {
   documents: 'SELECT d.document_id, u.filename, d.byte_length,\n       d.chunk_size, u.page_count, d.created_at\nFROM documents d\nJOIN upload_metadata u USING (document_id)\nORDER BY d.created_at DESC;',
   manifests: 'SELECT page_number, page_count, width, height,\n       observed_bytes, pixel_sha256\nFROM page_manifests\nORDER BY document_id, page_number;',
@@ -66,6 +67,7 @@ async function refreshState() {
   $('#connection-label').textContent = state.busy || pending ? 'Working' : 'Session active';
   $('#list-footer-text').textContent = state.documents.length ? `${bytes(state.stats.sourceBytes)} / 100 MB session limit` : 'Waiting for your first PDF';
   renderDocuments();
+  refreshSchema();
 }
 function renderDocuments() {
   const term = $('#document-search').value.toLowerCase();
@@ -83,6 +85,15 @@ async function selectDocument(id, keepPage = false) {
   renderDocuments(); renderInspector();
 }
 function renderInspector() {
+  // Keep the viewer (and its last complete canvas) while the inspector updates.
+  const previewPane = $('#preview-pane');
+  const previewFocus = previewPane?.contains(document.activeElement) ? document.activeElement : null;
+  previewPane?.remove();
+  if (!detail || inspectorTab !== 'overview') {
+    previewObserver.disconnect();
+    clearTimeout(previewResizeTimer);
+    closePreview();
+  }
   if (!detail) {
     $('#inspector').innerHTML = emptyInspector;
     setBusy(pending);
@@ -90,58 +101,139 @@ function renderInspector() {
   }
   const d = detail.document;
   $('#inspector').innerHTML = `<div class="inspector-head"><div><h2>${escapeHtml(d.filename)}</h2><p title="${d.document_id}">${d.document_id.slice(0,24)}… <span>SHA-256</span></p></div><div class="row"><button class="button small secondary" data-action="download" data-mutation>Download</button><button class="button small secondary" data-action="delete" data-mutation aria-label="Delete document">Delete</button></div></div><div class="inspector-tabs" role="tablist" aria-label="Document inspection"><button role="tab" aria-selected="${inspectorTab==='overview'}" class="inspector-tab ${inspectorTab==='overview'?'active':''}" data-tab="overview">Overview</button><button role="tab" aria-selected="${inspectorTab==='manifests'}" class="inspector-tab ${inspectorTab==='manifests'?'active':''}" data-tab="manifests">Page manifests <span class="count-pill">${detail.manifests.length}</span></button><button role="tab" aria-selected="${inspectorTab==='metadata'}" class="inspector-tab ${inspectorTab==='metadata'?'active':''}" data-tab="metadata">Metadata</button></div><div class="inspector-body" id="inspector-content"></div>`;
-  if (inspectorTab === 'overview') renderOverview();
+  if (inspectorTab === 'overview') renderOverview(previewPane);
+  if (previewFocus?.isConnected) previewFocus.focus({ preventScroll: true });
   if (inspectorTab === 'manifests') renderManifests();
   if (inspectorTab === 'metadata') $('#inspector-content').innerHTML = `<pre class="raw-metadata">${escapeHtml(JSON.stringify({document: d, profileId: state.profileId, renderingProfile: state.profile}, null, 2))}</pre>`;
   setBusy(pending);
 }
-function renderOverview() {
+function renderOverview(previewPane) {
   const d = detail.document, manifest = detail.manifests.find(m => m.page_number === page);
   const isVerified = manifest && verified.get(`${selectedId}:${page}`) === manifest.pixel_sha256;
-  $('#inspector-content').innerHTML = `<div class="doc-facts"><div><div class="fact-label">Source size</div><div class="fact-value">${bytes(d.byte_length)}</div></div><div><div class="fact-label">Chunk size</div><div class="fact-value">${bytes(d.chunk_size)}</div></div><div><div class="fact-label">Stored chunks</div><div class="fact-value">${number(d.chunk_count)}</div></div></div><div class="preview-toolbar"><span class="small-muted">DOCUMENT PREVIEW</span><div class="page-control"><button data-action="previous" aria-label="Previous page" ${page<=1?'disabled':''}>‹</button><label for="page-number">Page</label><input id="page-number" type="number" min="1" max="${d.page_count}" value="${page}" aria-label="Page number"><span>of ${d.page_count}</span><button data-action="next" aria-label="Next page" ${page>=d.page_count?'disabled':''}>›</button></div></div><div class="preview-frame" id="preview-frame"><span class="small-muted">Rendering preview…</span></div><p class="preview-description">Preview uses the source PDF. Trace below to measure a fresh browser renderer’s reads from SQLite WASM.</p><div class="action-row"><button class="button primary" data-action="trace" data-mutation>${icon('activity')}${manifest ? 'Retrace page' : 'Trace page'}</button><button class="button secondary" data-action="verify" data-mutation ${manifest?'':'disabled'}>${icon('check')}Verify replay</button><button class="button secondary" data-action="trace-all" data-mutation>Trace all pages</button></div><div class="section-label">CHUNK DEPENDENCIES</div>${manifest ? `<div class="manifest-summary"><span>${manifest.chunks.length} / ${d.chunk_count} chunks · ${bytes(manifest.observed_bytes)} read</span><span class="tag ${isVerified?'verified':''}">${isVerified ? 'REPLAY VERIFIED' : `${(100*manifest.observed_bytes/d.byte_length).toFixed(1)}% OF SOURCE`}</span></div><div class="chunk-map" aria-label="Chunk dependency map">${Array.from({length:Math.min(d.chunk_count,2048)},(_,n)=>`<span class="chunk-cell ${manifest.chunks.includes(n)?'used':''}" title="Chunk ${n}: bytes ${n*d.chunk_size}–${Math.min((n+1)*d.chunk_size,d.byte_length)-1}${manifest.chunks.includes(n)?' · Read during trace':''}"></span>`).join('')}</div><div class="chunk-legend"><span><span class="legend-dot"></span>Read by page ${page}</span><span><span class="legend-dot unused"></span>Not read</span>${d.chunk_count>2048?'<span>First 2,048 chunks shown</span>':''}</div>` : '<div class="simple-empty" style="padding:20px 10px">Trace this page to see exactly which chunks it needs.</div>'}`;
+  $('#inspector-content').innerHTML = `<div class="doc-facts"><div><div class="fact-label">Source size</div><div class="fact-value">${bytes(d.byte_length)}</div></div><div><div class="fact-label">Chunk size</div><div class="fact-value">${bytes(d.chunk_size)}</div></div><div><div class="fact-label">Stored chunks</div><div class="fact-value">${number(d.chunk_count)}</div></div></div><div id="preview-slot"></div><p class="preview-description">Preview uses the source PDF. Trace below to measure a fresh browser renderer’s reads from SQLite WASM.</p><div class="action-row"><button class="button primary" data-action="trace" data-mutation>${icon('activity')}${manifest ? 'Retrace page' : 'Trace page'}</button><button class="button secondary" data-action="verify" data-mutation ${manifest?'':'disabled'}>${icon('check')}Verify replay</button><button class="button secondary" data-action="trace-all" data-mutation>Trace all pages</button></div><div class="section-label">CHUNK DEPENDENCIES</div>${manifest ? `<div class="manifest-summary"><span>${manifest.chunks.length} / ${d.chunk_count} chunks · ${bytes(manifest.observed_bytes)} read</span><span class="tag ${isVerified?'verified':''}">${isVerified ? 'REPLAY VERIFIED' : `${(100*manifest.observed_bytes/d.byte_length).toFixed(1)}% OF SOURCE`}</span></div><div class="chunk-map" aria-label="Chunk dependency map">${Array.from({length:Math.min(d.chunk_count,2048)},(_,n)=>`<span class="chunk-cell ${manifest.chunks.includes(n)?'used':''}" title="Chunk ${n}: bytes ${n*d.chunk_size}–${Math.min((n+1)*d.chunk_size,d.byte_length)-1}${manifest.chunks.includes(n)?' · Read during trace':''}"></span>`).join('')}</div><div class="chunk-legend"><span><span class="legend-dot"></span>Read by page ${page}</span><span><span class="legend-dot unused"></span>Not read</span>${d.chunk_count>2048?'<span>First 2,048 chunks shown</span>':''}</div>` : '<div class="simple-empty" style="padding:20px 10px">Trace this page to see exactly which chunks it needs.</div>'}`;
+  mountPreview(previewPane);
   void renderPreview();
 }
+function mountPreview(pane) {
+  if (pane?.dataset.previewDocument !== selectedId) pane = null;
+  if (!pane) {
+    pane = document.createElement('div');
+    pane.id = 'preview-pane';
+    pane.dataset.previewDocument = selectedId;
+    pane.innerHTML = `<div class="preview-toolbar"><span class="small-muted">DOCUMENT PREVIEW</span><button class="button small secondary" data-action="expand-preview" aria-haspopup="dialog">Expand preview</button></div><div class="preview-toolbar"><div class="page-control"><button data-action="previous" aria-label="Previous page">‹</button><label for="page-number">Page</label><input id="page-number" type="number" min="1" aria-label="Page number"><span id="preview-page-count"></span><button data-action="next" aria-label="Next page">›</button></div><div class="preview-zoom"><label for="preview-zoom">Zoom</label><select id="preview-zoom" aria-label="Preview zoom"><option value="fit">Fit page</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select></div></div><div class="preview-stage"><div class="preview-frame" id="preview-frame" aria-label="Document page" tabindex="0"></div><span id="preview-status" class="preview-status" role="status"></span></div>`;
+  }
+  const expanded = $('#preview-dialog').open;
+  if (expanded) $('#preview-slot').style.height = `${previewInlineHeight}px`;
+  (expanded ? $('#reader-content') : $('#preview-slot')).append(pane);
+  pane.querySelector('[data-action="expand-preview"]').hidden = expanded;
+  pane.querySelector('[data-action="previous"]').disabled = page <= 1;
+  pane.querySelector('[data-action="next"]').disabled = page >= detail.document.page_count;
+  pane.querySelector('#page-number').value = page;
+  pane.querySelector('#page-number').max = detail.document.page_count;
+  pane.querySelector('#preview-page-count').textContent = `of ${detail.document.page_count}`;
+  pane.querySelector('#preview-zoom').value = previewZoom;
+  $('#preview-dialog-title').textContent = detail.document.filename;
+  previewObserver.disconnect();
+  previewObserver.observe($('#preview-frame'));
+}
+// Resize only the bitmap; CSS reserves the viewport before any PDF work starts.
+const previewObserver = new ResizeObserver(() => {
+  const frame = $('#preview-frame');
+  if (!frame?.clientWidth || !frame.clientHeight) return;
+  if (`${frame.clientWidth}:${frame.clientHeight}` === previewSize) return;
+  clearTimeout(previewResizeTimer);
+  previewResizeTimer = setTimeout(() => void renderPreview(), 100);
+});
+function expandPreview() {
+  const pane = $('#preview-pane');
+  if (!pane || $('#preview-dialog').open) return;
+  previewInlineHeight = pane.getBoundingClientRect().height;
+  $('#preview-slot').style.height = `${previewInlineHeight}px`;
+  $('#reader-content').append(pane);
+  pane.querySelector('[data-action="expand-preview"]').hidden = true;
+  $('#preview-dialog').showModal();
+  void renderPreview();
+}
+function restorePreview() {
+  if ($('#preview-dialog').open) return;
+  const pane = $('#reader-content #preview-pane');
+  if (!pane || !$('#preview-slot')) return;
+  $('#preview-slot').style.height = '';
+  $('#preview-slot').append(pane);
+  const button = pane.querySelector('[data-action="expand-preview"]');
+  button.hidden = false;
+  button.focus({ preventScroll: true });
+  void renderPreview();
+}
+function closePreview() {
+  $('#preview-dialog').close();
+  restorePreview();
+}
+$('#preview-dialog').addEventListener('close', restorePreview);
+$('#preview-dialog').addEventListener('cancel', event => {
+  event.preventDefault();
+  closePreview();
+});
 async function renderPreview() {
-  const generation = ++previewGeneration, id = selectedId, targetPage = page;
+  clearTimeout(previewResizeTimer);
+  const frame = $('#preview-frame'), status = $('#preview-status');
+  if (!frame?.clientWidth || !frame.clientHeight || !detail || currentView !== 'documents') return;
+  const generation = ++previewGeneration, id = selectedId, targetPage = page, zoom = previewZoom;
+  const isCurrent = () => generation === previewGeneration && frame.isConnected && selectedId === id && currentView === 'documents';
+  previewSize = `${frame.clientWidth}:${frame.clientHeight}`;
+  frame.setAttribute('aria-busy', 'true');
+  status.textContent = `Rendering page ${targetPage}…`;
+  status.hidden = false;
   try {
     renderTask?.cancel();
     if (!pdfjs) {
       pdfjs = await import('/vendor/pdf.mjs');
       pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.mjs';
     }
-    if (generation !== previewGeneration) return;
+    if (!isCurrent()) return;
     if (previewId !== id) {
       const previousTask = previewTask;
       previewId = null;
       previewTask = null;
       previewDoc = null;
       await previousTask?.destroy();
-      if (generation !== previewGeneration) return;
+      if (!isCurrent()) return;
       const data = await getDocumentBytes(id);
-      if (generation !== previewGeneration) return;
+      if (!isCurrent()) return;
       previewId = id;
       previewTask = pdfjs.getDocument({ data, cMapUrl: '/vendor/cmaps/', cMapPacked: true, standardFontDataUrl: '/vendor/standard_fonts/', wasmUrl:'/vendor/wasm/', iccUrl:'/vendor/iccs/', isEvalSupported:false, enableXfa:false });
       previewDoc = null;
     }
-    previewDoc = await previewTask.promise;
-    if (generation !== previewGeneration || !$('#preview-frame')) return;
+    const loadedDoc = await previewTask.promise;
+    if (!isCurrent()) return;
+    previewDoc = loadedDoc;
     const pdfPage = await previewDoc.getPage(targetPage);
-    if (generation !== previewGeneration) return;
+    if (!isCurrent()) return;
     const original = pdfPage.getViewport({ scale: 1 });
-    const width = Math.max(100, Math.min(560, $('#preview-frame').clientWidth - 48));
-    const scale = Math.min(width / original.width, 360 / original.height, 2);
-    const viewport = pdfPage.getViewport({ scale: scale * Math.min(window.devicePixelRatio || 1, 2) });
+    // PDF units are 72/inch; CSS pixels are 96/inch. At 100%, ordinary
+    // document text is readable without being shrunk to the inspector width.
+    const scale = zoom === 'fit'
+      ? Math.min(Math.max(1, frame.clientWidth - 48) / original.width, Math.max(1, frame.clientHeight - 48) / original.height)
+      : Number(zoom) * 96 / 72;
+    const width = original.width * scale, height = original.height * scale;
+    // Limit backing-store memory for unusually large pages without changing zoom.
+    const outputScale = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(20000000 / (width * height)), 16384 / width, 16384 / height);
+    const viewport = pdfPage.getViewport({ scale: scale * outputScale });
     const canvas = document.createElement('canvas');
     canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
-    canvas.style.width = `${original.width * scale}px`;
+    canvas.style.width = `${width}px`; canvas.style.height = `${height}px`;
     canvas.setAttribute('aria-label', `PDF preview, page ${targetPage}`);
     renderTask = pdfPage.render({canvasContext:canvas.getContext('2d'), viewport, annotationMode:pdfjs.AnnotationMode.DISABLE});
     await renderTask.promise;
-    if (generation !== previewGeneration || !$('#preview-frame')) return;
-    $('#preview-frame').replaceChildren(canvas);
+    if (!isCurrent()) return;
+    // Keep the previous complete page visible until the new bitmap is ready.
+    frame.replaceChildren(canvas);
+    frame.scrollTop = 0; frame.scrollLeft = 0;
   } catch (error) {
-    if (generation !== previewGeneration || error.name === 'RenderingCancelledException') return;
-    if ($('#preview-frame')) $('#preview-frame').innerHTML = `<div class="preview-error">Preview unavailable: ${escapeHtml(error.message)}<br>You can still download the original PDF or inspect its chunks.</div>`;
+    if (!isCurrent() || error.name === 'RenderingCancelledException') return;
+    frame.innerHTML = `<div class="preview-error">Preview unavailable: ${escapeHtml(error.message)}<br>You can still download the original PDF or inspect its chunks.</div>`;
+  } finally {
+    if (isCurrent()) { frame.setAttribute('aria-busy', 'false'); status.hidden = true; }
   }
 }
 function renderManifests() {
@@ -220,6 +312,8 @@ async function confirmAction(title, description, action) {
   return choice;
 }
 async function clearSelection() {
+  previewObserver.disconnect();
+  clearTimeout(previewResizeTimer);
   ++detailGeneration; ++previewGeneration;
   selectedId = null; detail = null; previewId = null; previewDoc = null;
   renderTask?.cancel(); await previewTask?.destroy(); previewTask = null;
@@ -242,24 +336,41 @@ async function resetSession() {
     $('#query-results').innerHTML='<div class="simple-empty">Session reset. Run a query to inspect the empty database.</div>';
     $('#result-count').textContent='—'; $('#query-time').textContent=''; $('#export-csv').disabled=true;
     await clearSelection(); await refreshState();
-    if(currentView==='schema') await loadSchema();
     log('Database session reset. All source PDFs and manifests cleared.'); notify('Session reset. Your database is empty.');
   });
 }
-function setView(view) {
-  if (!['documents','query','schema','activity'].includes(view)) view = 'documents';
+function setView(view, expandSchema = false) {
+  ++previewGeneration;
+  renderTask?.cancel();
+  clearTimeout(previewResizeTimer);
+  if (view !== 'documents') closePreview();
+  expandSchema ||= view === 'schema'; // Keep existing schema bookmarks useful.
+  if (view === 'schema') view = 'query';
+  if (!['documents','query','activity'].includes(view)) view = 'documents';
   currentView = view;
-  const text = {documents:['Documents','Document explorer','Upload, trace, and inspect. A closer look at your PDF pipeline.'],query:['SQL console','SQL console','Inspect your session with read-only SQL and export the results.'],schema:['Database schema','Database schema','See how original bytes, render profiles, and page dependencies fit together.'],activity:['Activity log','Session activity','A record of uploads, traces, queries, and verification results in this tab.']}[view];
+  const text = {documents:['Documents','Document explorer','Upload, trace, and inspect. A closer look at your PDF pipeline.'],query:['SQL console','SQL console','Inspect your session with read-only SQL and export the results.'],activity:['Activity log','Session activity','A record of uploads, traces, queries, and verification results in this tab.']}[view];
   $('#breadcrumb-current').textContent=text[0]; $('#page-title').textContent=text[1]; $('#page-subtitle').textContent=text[2];
   document.querySelectorAll('.view').forEach(el=>el.hidden=el.id!==`view-${view}`);
   document.querySelectorAll('.nav-item').forEach(el=>{el.classList.toggle('active',el.dataset.view===view); if(el.dataset.view===view)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');});
-  if(view==='schema') void loadSchema().catch(error=>notify(error.message,'error'));
+  if (expandSchema && !$('#schema-reference').open) $('#schema-reference').open = true;
+  else refreshSchema();
   if(view==='activity') renderLogs();
+  if(view==='documents') void renderPreview();
   history.replaceState(null,'',`#${view}`);
 }
+function refreshSchema() {
+  if (currentView === 'query' && $('#schema-reference').open) void loadSchema();
+}
+let schemaGeneration = 0;
 async function loadSchema() {
-  const {tables} = await api('/schema');
-  $('#schema-tables').innerHTML=tables.map(t=>`<section class="panel schema-card"><div class="panel-heading"><h2>${icon('database')}${escapeHtml(t.name)}</h2><span class="count-pill">${number(t.rowCount)} rows</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Column</th><th>Type</th><th>Constraint</th></tr></thead><tbody>${t.columns.map(c=>`<tr><td class="monospace">${escapeHtml(c.name)}</td><td>${escapeHtml(c.type)}</td><td>${c.pk?'PRIMARY KEY':c.notnull?'NOT NULL':'—'}</td></tr>`).join('')}</tbody></table></div><details><summary>View CREATE TABLE statement</summary><pre>${escapeHtml(t.sql)}</pre></details></section>`).join('');
+  const generation = ++schemaGeneration;
+  try {
+    const {tables} = await api('/schema');
+    if (generation !== schemaGeneration) return;
+    $('#schema-tables').innerHTML=tables.map(t=>`<section class="panel schema-card"><div class="panel-heading"><h2>${icon('database')}${escapeHtml(t.name)}</h2><span class="count-pill">${number(t.rowCount)} rows</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Column</th><th>Type</th><th>Constraint</th></tr></thead><tbody>${t.columns.map(c=>`<tr><td class="monospace">${escapeHtml(c.name)}</td><td>${escapeHtml(c.type)}</td><td>${c.pk?'PRIMARY KEY':c.notnull?'NOT NULL':'—'}</td></tr>`).join('')}</tbody></table></div><details><summary>View CREATE TABLE statement</summary><pre>${escapeHtml(t.sql)}</pre></details></section>`).join('');
+  } catch (error) {
+    if (generation === schemaGeneration) $('#schema-tables').innerHTML = `<div class="query-error">Unable to load schema: ${escapeHtml(error.message)}</div>`;
+  }
 }
 async function runQuery() {
   if (queryPending) return;
@@ -290,7 +401,7 @@ function exportCsv() {
 }
 document.addEventListener('click',async event=>{
   const viewButton=event.target.closest('[data-view]');
-  if(viewButton){event.preventDefault();setView(viewButton.dataset.view);return;}
+  if(viewButton){event.preventDefault();setView(viewButton.dataset.view, viewButton.hasAttribute('data-open-schema'));return;}
   const docButton=event.target.closest('[data-document]');
   if(docButton){try{await selectDocument(docButton.dataset.document);}catch(error){notify(error.message,'error');}return;}
   const tab=event.target.closest('[data-tab]');
@@ -308,6 +419,8 @@ document.addEventListener('click',async event=>{
   }
   const action=event.target.closest('[data-action]')?.dataset.action;
   if(!action)return;
+  if(action==='expand-preview')expandPreview();
+  if(action==='close-preview')closePreview();
   if(action==='download'){
     const {document_id:id,filename}=detail.document;
     await operation('Preparing original PDF…',async()=>{
@@ -317,7 +430,7 @@ document.addEventListener('click',async event=>{
       setTimeout(()=>URL.revokeObjectURL(url),1000);notify('Original PDF downloaded from browser memory.');
     });
   }
-  if(action==='previous'||action==='next'){page+=action==='next'?1:-1;renderInspector();}
+  if(action==='previous'||action==='next'){page=Math.max(1,Math.min(detail.document.page_count,page+(action==='next'?1:-1)));renderInspector();}
   if(action==='trace')await tracePages([page]);
   if(action==='trace-all'){
     const count=detail.document.page_count;
@@ -328,6 +441,7 @@ document.addEventListener('click',async event=>{
   if(action==='delete')await deleteDocument();
 });
 document.addEventListener('change',event=>{
+  if(event.target.id==='preview-zoom'){previewZoom=event.target.value;void renderPreview();}
   if(event.target.id==='page-number'){
     const value=Number(event.target.value);
     if(!Number.isSafeInteger(value)||value<1||value>detail.document.page_count){event.target.value=page;notify(`Choose a page between 1 and ${detail.document.page_count}.`,'error');return;}
@@ -356,6 +470,7 @@ window.addEventListener('dragover',event=>event.preventDefault());
 window.addEventListener('drop',event=>event.preventDefault());
 $('#document-search').oninput=renderDocuments;
 $('#reset-button').onclick=resetSession;
+$('#schema-reference').addEventListener('toggle', refreshSchema);
 $('#query-preset').onchange=()=>$('#sql-editor').value=presets[$('#query-preset').value];
 $('#run-query').onclick=runQuery;
 $('#export-csv').onclick=exportCsv;
