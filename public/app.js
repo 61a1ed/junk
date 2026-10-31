@@ -1,3 +1,5 @@
+import { clientRequest, getDocumentBytes } from './client-db.js';
+
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -17,10 +19,7 @@ const presets = {
   storage: 'SELECT u.filename, COUNT(*) AS chunks,\n       SUM(length(c.data)) AS stored_bytes\nFROM document_chunks c\nJOIN upload_metadata u USING (document_id)\nGROUP BY c.document_id;'
 };
 async function api(path, options = {}) {
-  const response = await fetch(`/api${path}`, options);
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
-  return result;
+  return clientRequest(path, options);
 }
 const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
 function notify(message, type = '') {
@@ -63,7 +62,7 @@ async function refreshState() {
   $('#stat-bytes').innerHTML = `${size} <span>${unit}</span>`;
   $('#nav-doc-count').textContent = state.documents.length;
   $('#list-count').textContent = state.documents.length;
-  $('#renderer-version').textContent = `PDF.js ${state.profile.pdfjsVersion} · SQLite`;
+  $('#renderer-version').textContent = `PDF.js ${state.profile.pdfjsVersion} · SQLite WASM`;
   $('#connection-label').textContent = state.busy || pending ? 'Working' : 'Session active';
   $('#list-footer-text').textContent = state.documents.length ? `${bytes(state.stats.sourceBytes)} / 100 MB session limit` : 'Waiting for your first PDF';
   renderDocuments();
@@ -90,7 +89,7 @@ function renderInspector() {
     return;
   }
   const d = detail.document;
-  $('#inspector').innerHTML = `<div class="inspector-head"><div><h2>${escapeHtml(d.filename)}</h2><p title="${d.document_id}">${d.document_id.slice(0,24)}… <span>SHA-256</span></p></div><div class="row"><a class="button small secondary" href="/api/documents/${d.document_id}/pdf" download="${escapeHtml(d.filename)}">Download</a><button class="button small secondary" data-action="delete" data-mutation aria-label="Delete document">Delete</button></div></div><div class="inspector-tabs" role="tablist" aria-label="Document inspection"><button role="tab" aria-selected="${inspectorTab==='overview'}" class="inspector-tab ${inspectorTab==='overview'?'active':''}" data-tab="overview">Overview</button><button role="tab" aria-selected="${inspectorTab==='manifests'}" class="inspector-tab ${inspectorTab==='manifests'?'active':''}" data-tab="manifests">Page manifests <span class="count-pill">${detail.manifests.length}</span></button><button role="tab" aria-selected="${inspectorTab==='metadata'}" class="inspector-tab ${inspectorTab==='metadata'?'active':''}" data-tab="metadata">Metadata</button></div><div class="inspector-body" id="inspector-content"></div>`;
+  $('#inspector').innerHTML = `<div class="inspector-head"><div><h2>${escapeHtml(d.filename)}</h2><p title="${d.document_id}">${d.document_id.slice(0,24)}… <span>SHA-256</span></p></div><div class="row"><button class="button small secondary" data-action="download" data-mutation>Download</button><button class="button small secondary" data-action="delete" data-mutation aria-label="Delete document">Delete</button></div></div><div class="inspector-tabs" role="tablist" aria-label="Document inspection"><button role="tab" aria-selected="${inspectorTab==='overview'}" class="inspector-tab ${inspectorTab==='overview'?'active':''}" data-tab="overview">Overview</button><button role="tab" aria-selected="${inspectorTab==='manifests'}" class="inspector-tab ${inspectorTab==='manifests'?'active':''}" data-tab="manifests">Page manifests <span class="count-pill">${detail.manifests.length}</span></button><button role="tab" aria-selected="${inspectorTab==='metadata'}" class="inspector-tab ${inspectorTab==='metadata'?'active':''}" data-tab="metadata">Metadata</button></div><div class="inspector-body" id="inspector-content"></div>`;
   if (inspectorTab === 'overview') renderOverview();
   if (inspectorTab === 'manifests') renderManifests();
   if (inspectorTab === 'metadata') $('#inspector-content').innerHTML = `<pre class="raw-metadata">${escapeHtml(JSON.stringify({document: d, profileId: state.profileId, renderingProfile: state.profile}, null, 2))}</pre>`;
@@ -99,7 +98,7 @@ function renderInspector() {
 function renderOverview() {
   const d = detail.document, manifest = detail.manifests.find(m => m.page_number === page);
   const isVerified = manifest && verified.get(`${selectedId}:${page}`) === manifest.pixel_sha256;
-  $('#inspector-content').innerHTML = `<div class="doc-facts"><div><div class="fact-label">Source size</div><div class="fact-value">${bytes(d.byte_length)}</div></div><div><div class="fact-label">Chunk size</div><div class="fact-value">${bytes(d.chunk_size)}</div></div><div><div class="fact-label">Stored chunks</div><div class="fact-value">${number(d.chunk_count)}</div></div></div><div class="preview-toolbar"><span class="small-muted">DOCUMENT PREVIEW</span><div class="page-control"><button data-action="previous" aria-label="Previous page" ${page<=1?'disabled':''}>‹</button><label for="page-number">Page</label><input id="page-number" type="number" min="1" max="${d.page_count}" value="${page}" aria-label="Page number"><span>of ${d.page_count}</span><button data-action="next" aria-label="Next page" ${page>=d.page_count?'disabled':''}>›</button></div></div><div class="preview-frame" id="preview-frame"><span class="small-muted">Rendering preview…</span></div><p class="preview-description">Browser preview uses the source PDF. Trace below to measure a fresh Node renderer’s chunk reads.</p><div class="action-row"><button class="button primary" data-action="trace" data-mutation>${icon('activity')}${manifest ? 'Retrace page' : 'Trace page'}</button><button class="button secondary" data-action="verify" data-mutation ${manifest?'':'disabled'}>${icon('check')}Verify replay</button><button class="button secondary" data-action="trace-all" data-mutation>Trace all pages</button></div><div class="section-label">CHUNK DEPENDENCIES</div>${manifest ? `<div class="manifest-summary"><span>${manifest.chunks.length} / ${d.chunk_count} chunks · ${bytes(manifest.observed_bytes)} read</span><span class="tag ${isVerified?'verified':''}">${isVerified ? 'REPLAY VERIFIED' : `${(100*manifest.observed_bytes/d.byte_length).toFixed(1)}% OF SOURCE`}</span></div><div class="chunk-map" aria-label="Chunk dependency map">${Array.from({length:Math.min(d.chunk_count,2048)},(_,n)=>`<span class="chunk-cell ${manifest.chunks.includes(n)?'used':''}" title="Chunk ${n}: bytes ${n*d.chunk_size}–${Math.min((n+1)*d.chunk_size,d.byte_length)-1}${manifest.chunks.includes(n)?' · Read during trace':''}"></span>`).join('')}</div><div class="chunk-legend"><span><span class="legend-dot"></span>Read by page ${page}</span><span><span class="legend-dot unused"></span>Not read</span>${d.chunk_count>2048?'<span>First 2,048 chunks shown</span>':''}</div>` : '<div class="simple-empty" style="padding:20px 10px">Trace this page to see exactly which chunks it needs.</div>'}`;
+  $('#inspector-content').innerHTML = `<div class="doc-facts"><div><div class="fact-label">Source size</div><div class="fact-value">${bytes(d.byte_length)}</div></div><div><div class="fact-label">Chunk size</div><div class="fact-value">${bytes(d.chunk_size)}</div></div><div><div class="fact-label">Stored chunks</div><div class="fact-value">${number(d.chunk_count)}</div></div></div><div class="preview-toolbar"><span class="small-muted">DOCUMENT PREVIEW</span><div class="page-control"><button data-action="previous" aria-label="Previous page" ${page<=1?'disabled':''}>‹</button><label for="page-number">Page</label><input id="page-number" type="number" min="1" max="${d.page_count}" value="${page}" aria-label="Page number"><span>of ${d.page_count}</span><button data-action="next" aria-label="Next page" ${page>=d.page_count?'disabled':''}>›</button></div></div><div class="preview-frame" id="preview-frame"><span class="small-muted">Rendering preview…</span></div><p class="preview-description">Preview uses the source PDF. Trace below to measure a fresh browser renderer’s reads from SQLite WASM.</p><div class="action-row"><button class="button primary" data-action="trace" data-mutation>${icon('activity')}${manifest ? 'Retrace page' : 'Trace page'}</button><button class="button secondary" data-action="verify" data-mutation ${manifest?'':'disabled'}>${icon('check')}Verify replay</button><button class="button secondary" data-action="trace-all" data-mutation>Trace all pages</button></div><div class="section-label">CHUNK DEPENDENCIES</div>${manifest ? `<div class="manifest-summary"><span>${manifest.chunks.length} / ${d.chunk_count} chunks · ${bytes(manifest.observed_bytes)} read</span><span class="tag ${isVerified?'verified':''}">${isVerified ? 'REPLAY VERIFIED' : `${(100*manifest.observed_bytes/d.byte_length).toFixed(1)}% OF SOURCE`}</span></div><div class="chunk-map" aria-label="Chunk dependency map">${Array.from({length:Math.min(d.chunk_count,2048)},(_,n)=>`<span class="chunk-cell ${manifest.chunks.includes(n)?'used':''}" title="Chunk ${n}: bytes ${n*d.chunk_size}–${Math.min((n+1)*d.chunk_size,d.byte_length)-1}${manifest.chunks.includes(n)?' · Read during trace':''}"></span>`).join('')}</div><div class="chunk-legend"><span><span class="legend-dot"></span>Read by page ${page}</span><span><span class="legend-dot unused"></span>Not read</span>${d.chunk_count>2048?'<span>First 2,048 chunks shown</span>':''}</div>` : '<div class="simple-empty" style="padding:20px 10px">Trace this page to see exactly which chunks it needs.</div>'}`;
   void renderPreview();
 }
 async function renderPreview() {
@@ -112,10 +111,16 @@ async function renderPreview() {
     }
     if (generation !== previewGeneration) return;
     if (previewId !== id) {
-      await previewTask?.destroy();
+      const previousTask = previewTask;
+      previewId = null;
+      previewTask = null;
+      previewDoc = null;
+      await previousTask?.destroy();
+      if (generation !== previewGeneration) return;
+      const data = await getDocumentBytes(id);
       if (generation !== previewGeneration) return;
       previewId = id;
-      previewTask = pdfjs.getDocument({ url: `/api/documents/${id}/pdf`, cMapUrl: '/vendor/cmaps/', cMapPacked: true, standardFontDataUrl: '/vendor/standard_fonts/', wasmUrl:'/vendor/wasm/', iccUrl:'/vendor/iccs/', isEvalSupported:false, enableXfa:false });
+      previewTask = pdfjs.getDocument({ data, cMapUrl: '/vendor/cmaps/', cMapPacked: true, standardFontDataUrl: '/vendor/standard_fonts/', wasmUrl:'/vendor/wasm/', iccUrl:'/vendor/iccs/', isEvalSupported:false, enableXfa:false });
       previewDoc = null;
     }
     previewDoc = await previewTask.promise;
@@ -231,7 +236,7 @@ async function deleteDocument() {
   });
 }
 async function resetSession() {
-  if (!await confirmAction('Reset the database session?', 'This removes every uploaded PDF, stored chunk, and page manifest. Other tabs connected to this server share this database.', 'Reset session')) return;
+  if (!await confirmAction('Reset this browser session?', 'This removes every uploaded PDF, stored chunk, and page manifest from this tab’s memory. Other tabs have their own databases.', 'Reset session')) return;
   await operation('Resetting database…',async()=>{
     await post('/reset'); verified.clear(); queryResult=null; ++queryGeneration;
     $('#query-results').innerHTML='<div class="simple-empty">Session reset. Run a query to inspect the empty database.</div>';
@@ -244,7 +249,7 @@ async function resetSession() {
 function setView(view) {
   if (!['documents','query','schema','activity'].includes(view)) view = 'documents';
   currentView = view;
-  const text = {documents:['Documents','Document explorer','Upload, trace, and inspect. A closer look at your PDF pipeline.'],query:['SQL console','SQL console','Inspect your session with read-only SQL and export the results.'],schema:['Database schema','Database schema','See how original bytes, render profiles, and page dependencies fit together.'],activity:['Activity log','Session activity','A record of uploads, traces, queries, and verification results.']}[view];
+  const text = {documents:['Documents','Document explorer','Upload, trace, and inspect. A closer look at your PDF pipeline.'],query:['SQL console','SQL console','Inspect your session with read-only SQL and export the results.'],schema:['Database schema','Database schema','See how original bytes, render profiles, and page dependencies fit together.'],activity:['Activity log','Session activity','A record of uploads, traces, queries, and verification results in this tab.']}[view];
   $('#breadcrumb-current').textContent=text[0]; $('#page-title').textContent=text[1]; $('#page-subtitle').textContent=text[2];
   document.querySelectorAll('.view').forEach(el=>el.hidden=el.id!==`view-${view}`);
   document.querySelectorAll('.nav-item').forEach(el=>{el.classList.toggle('active',el.dataset.view===view); if(el.dataset.view===view)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');});
@@ -295,7 +300,7 @@ document.addEventListener('click',async event=>{
   if(event.target.closest('#sample-button')){
     if(pending)return;
     await operation('Preparing sample PDF…',async()=>{
-      const response=await fetch('/api/sample.pdf');
+      const response=await fetch('/sample.pdf');
       if(!response.ok)throw new Error('Unable to load the sample PDF.');
       const file=new File([await response.blob()],'range-index-sample.pdf',{type:'application/pdf'});
       setBusy(false);await uploadFiles([file]);
@@ -303,6 +308,15 @@ document.addEventListener('click',async event=>{
   }
   const action=event.target.closest('[data-action]')?.dataset.action;
   if(!action)return;
+  if(action==='download'){
+    const {document_id:id,filename}=detail.document;
+    await operation('Preparing original PDF…',async()=>{
+      const data=await getDocumentBytes(id);
+      const url=URL.createObjectURL(new Blob([data],{type:'application/pdf'}));
+      const link=document.createElement('a');link.href=url;link.download=filename;link.click();
+      setTimeout(()=>URL.revokeObjectURL(url),1000);notify('Original PDF downloaded from browser memory.');
+    });
+  }
   if(action==='previous'||action==='next'){page+=action==='next'?1:-1;renderInspector();}
   if(action==='trace')await tracePages([page]);
   if(action==='trace-all'){
@@ -352,5 +366,5 @@ window.addEventListener('beforeunload',event=>{if(pending){event.preventDefault(
 try {
   await refreshState(); setView(location.hash.slice(1)||'documents');
   if(state.documents.length)await selectDocument(state.documents[0].document_id);
-  log('Connected to in-memory SQLite. Ready for PDF uploads.');
-}catch(error){$('#connection-label').textContent='Disconnected';notify(`Cannot connect to the debug server: ${error.message}`,'error');}
+  log('SQLite WASM is ready in this tab. PDF bytes stay in browser memory.');
+}catch(error){$('#connection-label').textContent='Unavailable';notify(`Could not initialize browser SQLite: ${error.message}`,'error');}

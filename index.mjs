@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { createCanvas } from '@napi-rs/canvas';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { pdfjsAssetDirectory } from './pdfjs-assets.mjs';
 
-const pdfjsRoot = new URL('./node_modules/pdfjs-dist/', import.meta.url);
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const canvasVersion = JSON.parse(readFileSync(
   new URL('./node_modules/@napi-rs/canvas/package.json', import.meta.url), 'utf8'
@@ -158,7 +158,6 @@ export async function renderColdPage({
       }).catch(fail);
     };
     transport.abort = () => { stopped = true; };
-    const assetDirectory = name => fileURLToPath(new URL(`${name}/`, pdfjsRoot));
     loadingTask = pdfjs.getDocument({
       range: transport,
       rangeChunkSize: chunkSize,
@@ -171,11 +170,11 @@ export async function renderColdPage({
       enableXfa: PROFILE.enableXfa,
       stopAtErrors: PROFILE.stopAtErrors,
       useWorkerFetch: false,
-      cMapUrl: assetDirectory('cmaps'),
+      cMapUrl: pdfjsAssetDirectory('cmaps'),
       cMapPacked: true,
-      standardFontDataUrl: assetDirectory('standard_fonts'),
-      wasmUrl: assetDirectory('wasm'),
-      iccUrl: assetDirectory('iccs'),
+      standardFontDataUrl: pdfjsAssetDirectory('standard_fonts'),
+      wasmUrl: pdfjsAssetDirectory('wasm'),
+      iccUrl: pdfjsAssetDirectory('iccs'),
     });
     loadingTask.onPassword = () => fail(new Error('A valid PDF password is required'));
     const document = await loadingTask.promise;

@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import { createCanvas } from '@napi-rs/canvas';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import {
@@ -9,6 +8,7 @@ import {
   renderColdPage, PROFILE, PROFILE_ID,
 } from '../index.mjs';
 import { makeFixturePdf, makeIncrementalFixturePdf, makeObjectStreamFixturePdf } from './fixture.mjs';
+import { pdfjsAssetDirectory } from '../pdfjs-assets.mjs';
 
 async function fullFilePixelHash(bytes, pageNumber) {
   const task = pdfjs.getDocument({
@@ -16,7 +16,7 @@ async function fullFilePixelHash(bytes, pageNumber) {
     useSystemFonts: PROFILE.useSystemFonts,
     disableFontFace: PROFILE.disableFontFace,
     stopAtErrors: true,
-    standardFontDataUrl: fileURLToPath(new URL('../node_modules/pdfjs-dist/standard_fonts/', import.meta.url)),
+    standardFontDataUrl: pdfjsAssetDirectory('standard_fonts'),
   });
   try {
     const doc = await task.promise;
@@ -31,6 +31,28 @@ async function fullFilePixelHash(bytes, pageNumber) {
     return createHash('sha256').update(pixels).digest('hex');
   } finally { await task.destroy(); }
 }
+
+await test('PDF.js accepts Windows asset paths, including decoded names and UNC shares', async () => {
+  for (const root of [
+    new URL('file:///E:/61a/junk/node_modules/pdfjs-dist/'),
+    new URL('file:///E:/PDF%20files/%E6%96%87%E6%A1%A3%23test/node_modules/pdfjs-dist/'),
+    new URL('file://fileserver/pdf-share/node_modules/pdfjs-dist/'),
+  ]) {
+    const paths = Object.fromEntries([
+      ['cMapUrl', 'cmaps'], ['standardFontDataUrl', 'standard_fonts'],
+      ['wasmUrl', 'wasm'], ['iccUrl', 'iccs'],
+    ].map(([key, name]) => [key, pdfjsAssetDirectory(name, { root, windows: true })]));
+    assert.ok(Object.values(paths).every(path => path.endsWith('/')));
+    assert.ok(!paths.cMapUrl.startsWith('file:'), 'Node asset loading expects a filesystem path');
+    if (root.href.includes('%20')) assert.ok(paths.cMapUrl.includes('PDF files\\文档#test'));
+    if (root.hostname) assert.ok(paths.cMapUrl.startsWith('\\\\fileserver\\pdf-share\\'));
+    // PDF.js validates all four paths during loading, before any assets are
+    // requested. This reproduces Windows' path format on every test platform.
+    const task = pdfjs.getDocument({ data: makeFixturePdf(), ...paths, useWorkerFetch: false });
+    try { assert.equal((await task.promise).numPages, 3); }
+    finally { await task.destroy(); }
+  }
+});
 
 await test('cold manifests are narrow, replay without fallback, and match full-file pixels', async () => {
   const db = openDatabase(':memory:');
