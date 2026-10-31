@@ -23,6 +23,8 @@ page.on('request', request => requests.push({ method: request.method(), url: req
 await page.addInitScript(() => {
   // Instrument browser boundaries without changing production modules.
   window.__storageWrites = [];
+  window.__nativeLocalStorage = localStorage;
+  window.__nativeSessionStorage = sessionStorage;
   const setItem = Storage.prototype.setItem;
   Storage.prototype.setItem = function (...args) {
     window.__storageWrites.push(args[0]);
@@ -103,6 +105,33 @@ const canvasSize = () => page.locator('#preview-frame canvas').evaluate(canvas =
 const noPageOverflow = async () => {
   const geometry = await page.evaluate(() => ({scroll:document.documentElement.scrollWidth, width:innerWidth}));
   assert.ok(geometry.scroll <= geometry.width + 1, `Page overflow: ${JSON.stringify(geometry)}`);
+};
+const openReader = async (pageNumber, {strictCurrentPage = true} = {}) => {
+  await page.getByRole('button', {name:'Open reader', exact:true}).click();
+  await visible('#pdf-reader');
+  await page.waitForFunction(() => document.querySelector('#pdf-reader-frame')?.contentWindow.PDFViewerApplication?.pdfDocument);
+  const reader = await (await page.locator('#pdf-reader-frame').elementHandle()).contentFrame();
+  await reader.waitForFunction(({pageNumber, strictCurrentPage}) => {
+    const app = window.PDFViewerApplication;
+    return (!strictCurrentPage || app.page === pageNumber) && app.pdfViewer.getPageView(pageNumber - 1)?.renderingState === 3;
+  }, {pageNumber, strictCurrentPage});
+  await page.locator('#workbench-overlay').waitFor({state:'hidden'});
+  return reader;
+};
+const fullViewportReader = async () => {
+  const bounds = await page.locator('#pdf-reader-frame').boundingBox();
+  const viewport = await page.evaluate(() => ({width:innerWidth, height:innerHeight}));
+  sameGeometry(bounds, {x:0, y:0, ...viewport});
+};
+const readerState = reader => reader.evaluate(() => {
+  const app = window.PDFViewerApplication;
+  return {page:app.page, scale:app.pdfViewer.currentScale,
+    scrollTop:app.pdfViewer.container.scrollTop, scrollLeft:app.pdfViewer.container.scrollLeft};
+});
+const readerStorageEmpty = async reader => {
+  assert.deepEqual(await reader.evaluate(() => window.__storageWrites), [], 'The PDF.js reader must not write persistent preferences or document history');
+  assert.equal(await reader.evaluate(() => window.__nativeLocalStorage.length + window.__nativeSessionStorage.length), 0);
+  assert.deepEqual(await reader.evaluate(() => indexedDB.databases()), []);
 };
 const step = label => console.log(`PASS ${label}`);
 try {
@@ -318,30 +347,108 @@ try {
   sameGeometry(await canvasSize(), {width:816, height:1056});
   step('rapid page navigation ignores a late response for an abandoned page');
 
-  await page.getByRole('button', {name:'Expand preview', exact:true}).click();
-  await visible('#preview-dialog[open]');
-  await previewComplete(3);
-  assert.ok((await page.locator('#preview-frame').boundingBox()).height > initialPreview.height);
-  sameGeometry(await canvasSize(), {width:816, height:1056});
+  const reader = await openReader(3);
+  await fullViewportReader();
+  assert.equal(await reader.locator('#viewer .page').count(), 3, 'The standard viewer keeps every page in its continuous document');
+  assert.equal(await reader.evaluate(() => window.PDFViewerApplication.pdfViewer.scrollMode), 0);
+  await reader.locator('.page[data-page-number="3"] .textLayer span').first().waitFor();
+  const selectableText = await reader.locator('.page[data-page-number="3"] .textLayer').evaluate(layer => {
+    const range = document.createRange();
+    range.selectNodeContents(layer);
+    const selection = window.getSelection();
+    selection.removeAllRanges(); selection.addRange(range);
+    const text = selection.toString();
+    selection.removeAllRanges();
+    return {text, userSelect:getComputedStyle(layer).userSelect};
+  });
+  assert.match(selectableText.text, /twelve-point Helvetica/);
+  assert.notEqual(selectableText.userSelect, 'none');
+  await reader.locator('#viewFindButton').click();
+  await reader.locator('#findInput').fill('Paragraph 12');
+  await reader.locator('#findInput').press('Enter');
+  await reader.locator('.textLayer .highlight.selected').first().waitFor();
+  await reader.waitForFunction(() => /\b3\b/.test(document.querySelector('#findResultsCount').textContent));
+  assert.match(await reader.locator('#findResultsCount').textContent(), /3/);
+  await reader.locator('#viewFindButton').click();
+  await reader.locator('#secondaryToolbarToggleButton').click();
+  const readerFileChooser = page.waitForEvent('filechooser');
+  await reader.locator('#secondaryOpenFile').click();
+  await (await readerFileChooser).setFiles({name:'reading-duplicate.pdf', mimeType:'application/pdf', buffer:Buffer.from(makeReadingFixturePdf())});
+  await notice('ready to inspect');
+  await mutationComplete();
+  await page.locator('#workbench-overlay').waitFor({state:'hidden'});
+  assert.equal(await page.locator('#stat-documents').textContent(), '2');
+  await reader.waitForFunction(() => window.PDFViewerApplication.page === 1);
+  step('stock Open imports a cross-frame File through SQLite and deduplicates the source PDF');
+  await reader.locator('#scaleSelect').selectOption('1.5');
+  await reader.locator('#pageNumber').fill('2');
+  await reader.locator('#pageNumber').press('Enter');
+  await reader.waitForFunction(() => {
+    const app = window.PDFViewerApplication;
+    return app.page === 2 && app.pdfViewer.currentScale === 1.5 && app.pdfViewer.getPageView(1)?.renderingState === 3;
+  });
+  await reader.locator('.page[data-page-number="2"] .textLayer span').first().waitFor();
+  await reader.evaluate(() => {
+    const app = window.PDFViewerApplication;
+    window.__readerDocument = app.pdfDocument;
+    window.__readerViewer = app.pdfViewer;
+    app.pdfViewer.container.scrollTop += 60;
+  });
+  await reader.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const savedReader = await readerState(reader);
+  assert.equal(savedReader.page, 2);
   await page.screenshot({path:'/tmp/pdf-workbench-reader.png', fullPage:true});
-  await page.getByRole('button', {name:'Previous page', exact:true}).click();
-  await previewComplete(2);
-  await page.getByRole('button', {name:'Close preview', exact:true}).click();
-  await page.locator('#preview-dialog').waitFor({state:'hidden'});
+  step('full-viewport PDF.js reader provides continuous pages, selectable text, find, and standard zoom');
+
+  await page.locator('#show-workbench').click();
+  await visible('#workbench-overlay[open]');
+  assert.equal(await page.getByRole('spinbutton', {name:'Page number'}).inputValue(), '2');
+  await page.getByRole('button', {name:'Trace page', exact:true}).click();
+  await notice('traced successfully');
+  await mutationComplete();
+  await page.locator('.nav-item[data-view="query"]').click();
+  await page.locator('#schema-reference > summary').click();
+  await visible('.schema-card');
+  await page.getByRole('textbox', {name:'SQL query'}).fill("SELECT page_number FROM page_manifests JOIN upload_metadata USING (document_id) WHERE filename = 'reading.pdf'");
+  await page.getByRole('button', {name:'Run query'}).click();
+  await queryComplete();
+  await visible('#query-results tbody td');
+  assert.equal((await page.locator('#query-results tbody td').textContent()).trim(), '2', 'Trace must follow the reader page when opening the workbench');
+  await page.screenshot({path:'/tmp/pdf-workbench-reader-overlay.png', fullPage:true});
+  await page.locator('#schema-reference > summary').click();
+  await page.locator('#hide-workbench').click();
+  await page.locator('#workbench-overlay').waitFor({state:'hidden'});
+  assert.deepEqual(await readerState(reader), savedReader);
+  assert.equal(await reader.evaluate(() => window.PDFViewerApplication.pdfDocument === window.__readerDocument && window.PDFViewerApplication.pdfViewer === window.__readerViewer), true);
+  await page.locator('#show-workbench').click();
+  await visible('#workbench-overlay[open]');
+  await page.locator('.nav-item[data-view="documents"]').click();
+  await page.keyboard.press('Escape');
+  await page.locator('#workbench-overlay').waitFor({state:'hidden'});
+  assert.deepEqual(await readerState(reader), savedReader);
+  await readerStorageEmpty(reader);
+  await reader.evaluate(() => {
+    const close = window.PDFWorkbenchReader.close.bind(window.PDFWorkbenchReader);
+    const deferred = Promise.withResolvers();
+    window.__releaseReaderClose = deferred.resolve;
+    window.PDFWorkbenchReader.close = async (...args) => {
+      window.__readerCloseStarted = true;
+      await deferred.promise;
+      return close(...args);
+    };
+  });
+  await page.locator('#show-workbench').click();
+  await visible('#workbench-overlay[open]');
+  await page.locator('#exit-reader').click();
+  await reader.waitForFunction(() => window.__readerCloseStarted);
+  assert.equal(await page.locator('#pdf-reader-frame').count(), 1, 'Reader must remain alive until PDF.js finishes closing and saving edits');
+  await reader.evaluate(() => window.__releaseReaderClose());
+  await page.locator('#pdf-reader').waitFor({state:'hidden'});
+  assert.equal(await page.locator('#pdf-reader-frame').count(), 0);
   await previewComplete(2);
   sameGeometry(await previewGeometry(), initialPreview);
-  assert.equal(await page.getByRole('combobox', {name:'Preview zoom'}).inputValue(), '1');
-  await page.getByRole('button', {name:'Expand preview', exact:true}).click();
-  await visible('#preview-dialog[open]');
-  await page.getByRole('combobox', {name:'Preview zoom'}).selectOption('1.5');
-  await previewComplete(2);
-  sameGeometry(await canvasSize(), {width:1584, height:1224});
-  await page.keyboard.press('Escape');
-  await page.locator('#preview-dialog').waitFor({state:'hidden'});
-  await previewComplete(2);
-  assert.equal(await page.getByRole('spinbutton', {name:'Page number'}).inputValue(), '2');
-  assert.equal(await page.getByRole('combobox', {name:'Preview zoom'}).inputValue(), '1.5');
-  step('expanded preview and Escape preserve the current page and zoom');
+  step('workbench overlay traces the reader page and preserves the live document, zoom, and scroll on return or Escape');
+  step('exiting waits for PDF.js to finish closing before destroying its frame');
 
   await page.setViewportSize({width:390,height:844});
   await page.getByRole('combobox', {name:'Preview zoom'}).selectOption('1');
@@ -362,20 +469,39 @@ try {
     return {right:canvas.right - outer.right, bottom:canvas.bottom - outer.bottom};
   });
   assert.ok(endEdges.right <= 1 && endEdges.bottom <= 1, 'The end of an oversized page must remain reachable');
-  await page.getByRole('button', {name:'Expand preview', exact:true}).click();
-  await previewComplete(2);
+  // At this width multiple fitted pages can be visible; stock PDF.js chooses
+  // its current page from visibility while still rendering the requested page.
+  const mobileReader = await openReader(2, {strictCurrentPage:false});
+  await fullViewportReader();
   await noPageOverflow();
+  await page.screenshot({path:'/tmp/pdf-workbench-reader-mobile.png', fullPage:true});
+  await page.locator('#show-workbench').click();
+  await visible('#workbench-overlay[open]');
+  await page.locator('.nav-item[data-view="query"]').click();
+  await page.getByRole('textbox', {name:'SQL query'}).fill('SELECT count(*) FROM documents');
+  await page.getByRole('button', {name:'Run query'}).click();
+  await queryComplete();
+  await visible('#query-results tbody td');
+  assert.equal((await page.locator('#query-results tbody td').textContent()).trim(), '2');
   await page.keyboard.press('Escape');
-  await page.locator('#preview-dialog').waitFor({state:'hidden'});
-  await page.setViewportSize({width:1440,height:1060});
-  await page.getByRole('combobox', {name:'Preview zoom'}).selectOption('fit');
-  await previewComplete(2);
+  await page.locator('#workbench-overlay').waitFor({state:'hidden'});
+  await fullViewportReader();
+  await readerStorageEmpty(mobileReader);
+  await page.locator('#show-workbench').click();
+  await visible('#workbench-overlay[open]');
+  await page.locator('.nav-item[data-view="documents"]').click();
   await page.getByRole('button', {name:'Delete document', exact:true}).click();
   await page.getByRole('button', {name:'Delete PDF', exact:true}).click();
   await notice('PDF deleted');
   await mutationComplete();
+  await page.locator('#pdf-reader').waitFor({state:'hidden'});
+  assert.equal(await page.locator('#pdf-reader-frame').count(), 0);
+  assert.equal(await page.locator('#workbench-overlay').isVisible(), false);
+  await page.setViewportSize({width:1440,height:1060});
+  await page.getByRole('combobox', {name:'Preview zoom'}).selectOption('fit');
+  await previewComplete(1);
   assert.equal(await page.locator('#stat-documents').textContent(), '1');
-  step('mobile readable preview scrolls without overflowing the page');
+  step('mobile preview scrolls, the reader fills the viewport, and deleting its PDF closes the reader');
 
   await page.locator('#file-input').setInputFiles({name: 'duplicate.pdf', mimeType:'application/pdf', buffer:Buffer.from(sample)});
   await notice('ready to inspect');
@@ -422,6 +548,11 @@ try {
   await notice('ready to inspect');
   await mutationComplete();
 
+  const resetReader = await openReader(1, {strictCurrentPage:false});
+  await readerStorageEmpty(resetReader);
+  await page.locator('#show-workbench').click();
+  await visible('#workbench-overlay[open]');
+
   // Pause a query worker after its live database snapshot is taken, then reset.
   const queryReady = Promise.withResolvers();
   const releaseQuery = Promise.withResolvers();
@@ -436,7 +567,7 @@ try {
   await page.locator('#schema-reference > summary').click();
   await visible('.schema-card');
   const documentsSchema = page.locator('.schema-card').filter({has:page.getByRole('heading', {name:'documents', exact:true})});
-  assert.equal(await documentsSchema.locator('.count-pill').textContent(), '1 rows');
+  await documentsSchema.locator('.count-pill').filter({hasText:/^1 rows$/}).waitFor();
   await page.getByRole('textbox', {name:'SQL query'}).fill('SELECT count(*) FROM documents');
   await page.getByRole('button', {name:'Run query'}).click();
   await queryReady.promise;
@@ -445,6 +576,9 @@ try {
   await notice('Session reset.');
   await mutationComplete();
   assert.equal(await page.locator('#stat-documents').textContent(), '0');
+  await page.locator('#pdf-reader').waitFor({state:'hidden'});
+  assert.equal(await page.locator('#pdf-reader-frame').count(), 0);
+  assert.equal(await page.locator('#workbench-overlay').isVisible(), false);
   releaseQuery.resolve();
   await page.waitForFunction(() => !document.querySelector('#run-query').disabled);
   assert.match(await page.locator('#query-results').textContent(), /Session reset/);
@@ -454,6 +588,7 @@ try {
     card.querySelector('h2')?.textContent === 'documents' && card.querySelector('.count-pill')?.textContent === '0 rows'));
   await page.unroute('**/query-worker.js', queryRoute);
   step('delete cascading records and full session reset');
+  step('reset closes the active reader and releases its document');
   step('late SQL response cannot restore results after a reset');
 
   await secondTab.locator('.nav-item[data-view="query"]').click();
@@ -476,6 +611,11 @@ try {
 
   assert.deepEqual(errors, [], `Unexpected browser exceptions: ${errors.join('; ')}`);
   step('no uncaught browser errors');
+} catch (error) {
+  console.error('Browser errors:', errors);
+  console.error('Workbench notice:', await page.locator('#notice').textContent());
+  await page.screenshot({path:'/tmp/pdf-workbench-failure.png', fullPage:true});
+  throw error;
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

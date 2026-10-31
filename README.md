@@ -18,7 +18,7 @@ Set `PORT` for another port. The default host is loopback; browser workers and W
 ## Debug a PDF
 
 1. Select PDFs, drag them into the page, or choose **Load sample PDF** to try the three-page range-index fixture. Set the chunk size before importing. Duplicate bytes reuse the existing document; changing its chunk size requires deleting it first.
-2. Select a document and page. Choose **Expand preview** for a larger reading window, then **100%**, **150%**, or **200%** zoom for readable text; **Fit page** shows the whole page. The preview viewport keeps its size while pages load, and zoom is retained as you navigate. **Download** reconstructs the original PDF from its SQLite chunks in the browser.
+2. Select a document and page, then choose **Open reader**. The full PDF.js viewer fills the window, with continuous pages, selectable text, search, thumbnails, links, zoom, rotation, printing, and download. Choose **Workbench** to open the app over the document; **Return to document** or Escape closes the overlay without losing your page, zoom, or scroll position. **Exit reader** returns to the normal workbench. The inline preview keeps a fixed size for tracing and still offers fit/100–200% zoom.
 3. Choose **Trace page** or **Trace all pages**. Each page uses a fresh PDF.js loading task with byte ranges read from SQLite WASM. Completed traces publish a manifest and display the chunks actually observed, including bootstrap dependencies.
 4. Choose **Verify replay**. A fresh browser renderer is allowed to read only the recorded chunks and must produce the same pixel hash. Browser manifests use a distinct rendering profile from the optional Node CLI; they are observations for that profile, not universal PDF dependencies.
 5. Open **Page manifests** to inspect traces and combine the deduplicated ranges for selected pages. Enter `1, 3` or `1-3`; ranges are half-open `[start, end)`.
@@ -32,7 +32,8 @@ Set `PORT` for another port. The default host is loopback; browser workers and W
 - Each cold trace has a 60-second timeout and a 20-million-pixel canvas limit. Multi-page traces run sequentially.
 - SQL runs in a separate disposable browser worker on a snapshot of the current database. Only a single read query is accepted, and SQLite's `query_only` setting blocks writes. The worker is terminated after two seconds; the live database and UI remain available.
 - Results are capped at 500 rows and approximately 2 MiB. Long cells are truncated and BLOBs are summarized. Queries cannot change the live database. CSV export contains the displayed results.
-- The workbench does not perform OCR, text extraction, or document editing.
+- The reader uses the official PDF.js 6.4.299 viewer, served locally with its matching renderer. Its preferences, view history, and saved signatures remain in iframe memory and disappear when you exit the reader. Source and license details are in [`public/pdfjs/NOTICE.md`](public/pdfjs/NOTICE.md).
+- PDF.js supports selecting/searching existing text and its standard annotation tools. Use its download control to save reader edits; tracing and replay always use the original bytes imported into SQLite. The workbench does not perform OCR.
 
 ## Validation
 
@@ -42,7 +43,7 @@ npm test
 
 This checks the existing PDF indexing library (including Windows asset path handling) and verifies that the development server serves frontend assets while rejecting all database API operations.
 
-The optional browser smoke test exercises the real SQLite WASM UI, tracing, replay, SQL, isolation between tabs, and clearing on reload. With Playwright and Chromium available:
+The optional browser smoke test exercises the real SQLite WASM UI, tracing, replay, SQL, full-page PDF.js reading and its workbench overlay, isolation between tabs, and clearing on reload. With Playwright and Chromium available:
 
 ```sh
 node test/browser-smoke.mjs

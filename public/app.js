@@ -1,4 +1,5 @@
 import { clientRequest, getDocumentBytes } from './client-db.js';
+import { createReader } from './reader-shell.js';
 
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -12,7 +13,23 @@ const bytes = value => {
 let state = { documents: [], stats: {}, profile: {} }, selectedId = null, detail = null, page = 1, inspectorTab = 'overview', currentView = 'documents';
 let pending = false, queryPending = false, queryGeneration = 0, logs = [], queryResult = null, verified = new Map();
 let pdfjs, previewTask, previewDoc, previewId, renderTask, previewGeneration = 0, detailGeneration = 0;
-let previewZoom = 'fit', previewSize = '', previewResizeTimer, previewInlineHeight = 0;
+let previewZoom = 'fit', previewSize = '', previewResizeTimer;
+const reader = createReader({
+  getBytes: getDocumentBytes,
+  onShowWorkbench: async (id, currentPage) => {
+    if (selectedId !== id) await selectDocument(id, true);
+    if (!reader.active || reader.documentId !== id || selectedId !== id || !detail) return;
+    page = Math.max(1, Math.min(currentPage, detail.document.page_count));
+    renderInspector();
+  },
+  onFiles: files => uploadFiles([...files].map(file => new File([file], file.name, { type: file.type, lastModified: file.lastModified })), { read: true }),
+});
+document.addEventListener('reader-error', event => notify(event.detail.message, 'error'));
+async function openReader() {
+  if (!detail) return;
+  try { await reader.open(detail.document, page); }
+  catch (error) { notify(error.message, 'error'); log(error.message, true); }
+}
 const presets = {
   documents: 'SELECT d.document_id, u.filename, d.byte_length,\n       d.chunk_size, u.page_count, d.created_at\nFROM documents d\nJOIN upload_metadata u USING (document_id)\nORDER BY d.created_at DESC;',
   manifests: 'SELECT page_number, page_count, width, height,\n       observed_bytes, pixel_sha256\nFROM page_manifests\nORDER BY document_id, page_number;',
@@ -92,7 +109,6 @@ function renderInspector() {
   if (!detail || inspectorTab !== 'overview') {
     previewObserver.disconnect();
     clearTimeout(previewResizeTimer);
-    closePreview();
   }
   if (!detail) {
     $('#inspector').innerHTML = emptyInspector;
@@ -120,19 +136,15 @@ function mountPreview(pane) {
     pane = document.createElement('div');
     pane.id = 'preview-pane';
     pane.dataset.previewDocument = selectedId;
-    pane.innerHTML = `<div class="preview-toolbar"><span class="small-muted">DOCUMENT PREVIEW</span><button class="button small secondary" data-action="expand-preview" aria-haspopup="dialog">Expand preview</button></div><div class="preview-toolbar"><div class="page-control"><button data-action="previous" aria-label="Previous page">‹</button><label for="page-number">Page</label><input id="page-number" type="number" min="1" aria-label="Page number"><span id="preview-page-count"></span><button data-action="next" aria-label="Next page">›</button></div><div class="preview-zoom"><label for="preview-zoom">Zoom</label><select id="preview-zoom" aria-label="Preview zoom"><option value="fit">Fit page</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select></div></div><div class="preview-stage"><div class="preview-frame" id="preview-frame" aria-label="Document page" tabindex="0"></div><span id="preview-status" class="preview-status" role="status"></span></div>`;
+    pane.innerHTML = `<div class="preview-toolbar"><span class="small-muted">DOCUMENT PREVIEW</span><button class="button small secondary" data-action="open-reader">Open reader</button></div><div class="preview-toolbar"><div class="page-control"><button data-action="previous" aria-label="Previous page">‹</button><label for="page-number">Page</label><input id="page-number" type="number" min="1" aria-label="Page number"><span id="preview-page-count"></span><button data-action="next" aria-label="Next page">›</button></div><div class="preview-zoom"><label for="preview-zoom">Zoom</label><select id="preview-zoom" aria-label="Preview zoom"><option value="fit">Fit page</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option></select></div></div><div class="preview-stage"><div class="preview-frame" id="preview-frame" aria-label="Document page" tabindex="0"></div><span id="preview-status" class="preview-status" role="status"></span></div>`;
   }
-  const expanded = $('#preview-dialog').open;
-  if (expanded) $('#preview-slot').style.height = `${previewInlineHeight}px`;
-  (expanded ? $('#reader-content') : $('#preview-slot')).append(pane);
-  pane.querySelector('[data-action="expand-preview"]').hidden = expanded;
+  $('#preview-slot').append(pane);
   pane.querySelector('[data-action="previous"]').disabled = page <= 1;
   pane.querySelector('[data-action="next"]').disabled = page >= detail.document.page_count;
   pane.querySelector('#page-number').value = page;
   pane.querySelector('#page-number').max = detail.document.page_count;
   pane.querySelector('#preview-page-count').textContent = `of ${detail.document.page_count}`;
   pane.querySelector('#preview-zoom').value = previewZoom;
-  $('#preview-dialog-title').textContent = detail.document.filename;
   previewObserver.disconnect();
   previewObserver.observe($('#preview-frame'));
 }
@@ -143,36 +155,6 @@ const previewObserver = new ResizeObserver(() => {
   if (`${frame.clientWidth}:${frame.clientHeight}` === previewSize) return;
   clearTimeout(previewResizeTimer);
   previewResizeTimer = setTimeout(() => void renderPreview(), 100);
-});
-function expandPreview() {
-  const pane = $('#preview-pane');
-  if (!pane || $('#preview-dialog').open) return;
-  previewInlineHeight = pane.getBoundingClientRect().height;
-  $('#preview-slot').style.height = `${previewInlineHeight}px`;
-  $('#reader-content').append(pane);
-  pane.querySelector('[data-action="expand-preview"]').hidden = true;
-  $('#preview-dialog').showModal();
-  void renderPreview();
-}
-function restorePreview() {
-  if ($('#preview-dialog').open) return;
-  const pane = $('#reader-content #preview-pane');
-  if (!pane || !$('#preview-slot')) return;
-  $('#preview-slot').style.height = '';
-  $('#preview-slot').append(pane);
-  const button = pane.querySelector('[data-action="expand-preview"]');
-  button.hidden = false;
-  button.focus({ preventScroll: true });
-  void renderPreview();
-}
-function closePreview() {
-  $('#preview-dialog').close();
-  restorePreview();
-}
-$('#preview-dialog').addEventListener('close', restorePreview);
-$('#preview-dialog').addEventListener('cancel', event => {
-  event.preventDefault();
-  closePreview();
 });
 async function renderPreview() {
   clearTimeout(previewResizeTimer);
@@ -251,7 +233,8 @@ function parsePages(input, max) {
   if (!result.size || result.size > 100) throw new Error('Choose between 1 and 100 pages.');
   return [...result];
 }
-async function uploadFiles(files) {
+async function uploadFiles(files, { read = false } = {}) {
+  let acceptedId;
   await operation(`Uploading ${files.length} PDF${files.length===1?'':'s'}…`, async () => {
     let accepted = 0, failures = [];
     for (const file of files) {
@@ -266,10 +249,11 @@ async function uploadFiles(files) {
       } catch (error) { failures.push(`${file.name}: ${error.message}`); log(failures.at(-1), true); }
     }
     await refreshState();
-    if (accepted) { await selectDocument(selectedId); setView('documents'); }
+    if (accepted) { await selectDocument(selectedId); setView('documents'); acceptedId = selectedId; }
     notify(failures.length ? `${accepted} accepted. ${failures.join(' ')}` : `${accepted} PDF${accepted===1?'':'s'} ready to inspect. Select a page and run a cold trace.`, failures.length?'error':'');
   });
   $('#file-input').value = '';
+  if (read && acceptedId === selectedId && detail) await openReader();
 }
 async function tracePages(pages) {
   const id = selectedId;
@@ -312,6 +296,7 @@ async function confirmAction(title, description, action) {
   return choice;
 }
 async function clearSelection() {
+  if (reader.active) await reader.exit();
   previewObserver.disconnect();
   clearTimeout(previewResizeTimer);
   ++detailGeneration; ++previewGeneration;
@@ -343,7 +328,6 @@ function setView(view, expandSchema = false) {
   ++previewGeneration;
   renderTask?.cancel();
   clearTimeout(previewResizeTimer);
-  if (view !== 'documents') closePreview();
   expandSchema ||= view === 'schema'; // Keep existing schema bookmarks useful.
   if (view === 'schema') view = 'query';
   if (!['documents','query','activity'].includes(view)) view = 'documents';
@@ -419,8 +403,7 @@ document.addEventListener('click',async event=>{
   }
   const action=event.target.closest('[data-action]')?.dataset.action;
   if(!action)return;
-  if(action==='expand-preview')expandPreview();
-  if(action==='close-preview')closePreview();
+  if(action==='open-reader')await openReader();
   if(action==='download'){
     const {document_id:id,filename}=detail.document;
     await operation('Preparing original PDF…',async()=>{

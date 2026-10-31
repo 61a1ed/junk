@@ -13,8 +13,9 @@ const contentTypes = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.sql': 'text/plain; charset=utf-8', '.wasm': 'application/wasm',
-  '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png',
+  '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png', '.gif': 'image/gif',
   '.ico': 'image/x-icon', '.pdf': 'application/pdf',
+  '.json': 'application/json; charset=utf-8', '.ftl': 'text/plain; charset=utf-8',
 };
 
 // Development asset server only. PDFs, SQLite, queries, and rendering all live
@@ -41,6 +42,19 @@ export function createDebugServer({ host = '127.0.0.1' } = {}) {
       else {
         let root = PUBLIC_ROOT;
         let relative = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).slice(1);
+        // The official viewer keeps its release-matched core in public/pdfjs.
+        // Its unchanged relative URLs reuse the identical worker and resources
+        // from the pinned pdfjs-dist dependency instead of vendoring duplicates.
+        if (url.pathname.startsWith('/pdfjs/')) {
+          const viewerAsset = decodeURIComponent(url.pathname.slice('/pdfjs/'.length));
+          if (/^build\/pdf\.(worker|sandbox)\.mjs$/.test(viewerAsset)) {
+            root = PDF_ROOT;
+            relative = viewerAsset;
+          } else if (/^web\/(cmaps|standard_fonts|wasm|iccs)\/[^/]+$/.test(viewerAsset)) {
+            root = PDF_ROOT;
+            relative = viewerAsset.slice('web/'.length);
+          }
+        }
         if (url.pathname.startsWith('/vendor/')) {
           relative = decodeURIComponent(url.pathname.slice('/vendor/'.length));
           if (['sql-wasm.js', 'sql-wasm.wasm'].includes(relative)) root = SQL_ROOT;

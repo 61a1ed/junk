@@ -22,6 +22,8 @@
   <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
   <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 6a8 8 0 0 1 13 2M5 16a8 8 0 0 0 13 2"/></symbol>
 </defs></svg>
+<div id="workbench-home">
+<div id="workbench">
 <aside class="sidebar">
   <a class="brand" href="#documents"><span class="brand-mark"><svg class="icon"><use href="#i-document"/></svg></span><span>PDF Workbench<small>DEVELOPER TOOLS</small></span></a>
   <div class="workspace-switch"><span class="workspace-avatar">L</span><span>Local workspace<small>Browser-only session</small></span><span class="status-dot"></span></div>
@@ -59,8 +61,16 @@ ORDER BY created_at DESC;</textarea><div class="query-actions"><span class="smal
     <footer class="main-footer"><span>PDF Workbench <span class="footer-divider">/</span> An internal development tool</span><span id="renderer-version">PDF.js · SQLite WASM</span></footer>
   </main>
 </div>
+</div>
+</div>
 <input type="file" id="file-input" accept="application/pdf,.pdf" multiple hidden>
-<dialog id="preview-dialog" aria-labelledby="preview-dialog-title"><div class="reader-heading"><h2 id="preview-dialog-title">Document preview</h2><button class="button secondary" data-action="close-preview" autofocus>Close preview</button></div><div id="reader-content"></div></dialog>
+<section id="pdf-reader" aria-label="Document reader" hidden>
+  <iframe id="pdf-reader-frame" title="Document reader" allow="fullscreen" allowfullscreen></iframe>
+  <button id="show-workbench" class="button primary" type="button" aria-controls="workbench-overlay" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg>Workbench</button>
+</section>
+<dialog id="workbench-overlay" aria-labelledby="workbench-overlay-title">
+  <div class="workbench-overlay-toolbar"><h2 id="workbench-overlay-title">PDF Workbench</h2><div class="workbench-overlay-actions"><button id="hide-workbench" class="button primary" type="button" autofocus>Return to document</button><button id="exit-reader" class="button secondary" type="button">Exit reader</button></div></div>
+</dialog>
 <dialog id="confirm-dialog"><form method="dialog"><div class="dialog-icon"><svg class="icon"><use href="#i-refresh"/></svg></div><h2 id="confirm-title">Reset session?</h2><p id="confirm-description">This removes all PDFs and page manifests from this tab’s in-memory database.</p><div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button danger" value="confirm" id="confirm-submit">Reset session</button></div></form></dialog>
 <script type="module" src="/app.js"></script>
 </body>
