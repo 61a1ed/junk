@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#192c27">
+  <meta name="description" content="An internal workbench for inspecting PDF storage, cold page traces, and SQLite data.">
+  <title>PDF Workbench · Database debugger</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+  <symbol id="i-document" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 7-5 5 5 5m8-10 5 5-5 5M14 4l-4 16"/></symbol>
+  <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M2 12h4l3-8 6 16 3-8h4"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V3m-5 5 5-5 5 5M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 6a8 8 0 0 1 13 2M5 16a8 8 0 0 0 13 2"/></symbol>
+</defs></svg>
+<aside class="sidebar">
+  <a class="brand" href="#documents"><span class="brand-mark"><svg class="icon"><use href="#i-document"/></svg></span><span>PDF Workbench<small>DEVELOPER TOOLS</small></span></a>
+  <div class="workspace-switch"><span class="workspace-avatar">L</span><span>Local workspace<small>Development environment</small></span><span class="status-dot"></span></div>
+  <div class="nav-label">WORKSPACE</div>
+  <nav aria-label="Main navigation">
+    <button class="nav-item active" data-view="documents"><svg class="icon"><use href="#i-grid"/></svg>Documents<span class="nav-count" id="nav-doc-count">0</span></button>
+    <button class="nav-item" data-view="query"><svg class="icon"><use href="#i-code"/></svg>SQL console<kbd>⌘ ↵</kbd></button>
+    <button class="nav-item" data-view="schema"><svg class="icon"><use href="#i-database"/></svg>Database schema</button>
+    <button class="nav-item" data-view="activity"><svg class="icon"><use href="#i-activity"/></svg>Activity log<span class="nav-count" id="log-count">0</span></button>
+  </nav>
+  <div class="sidebar-bottom"><div class="session-card"><div><span class="status-dot"></span> In-memory SQLite</div><p>Your data stays in this server session. Restarting the server clears it.</p><code>:memory:</code></div><div class="sidebar-foot"><span class="small-logo">P</span><span>PDF range index</span><span>v1.0</span></div></div>
+</aside>
+<div class="workspace">
+  <header class="topbar"><div><span class="breadcrumb">Workspace</span><span class="slash">/</span><span id="breadcrumb-current">Documents</span></div><div class="topbar-right"><span class="session-label"><span class="status-dot"></span><span id="connection-label">Connecting</span></span><span class="internal-label">INTERNAL</span></div></header>
+  <main>
+    <div class="page-heading"><div><div class="eyebrow">PDF DATABASE</div><h1 id="page-title">Document explorer</h1><p id="page-subtitle">Upload, trace, and inspect. A closer look at your PDF pipeline.</p></div><div class="heading-actions"><button class="button secondary" id="reset-button" title="Delete all documents and manifests in this server session"><svg class="icon"><use href="#i-refresh"/></svg>Reset session</button><button class="button primary" id="upload-button"><svg class="icon"><use href="#i-plus"/></svg>Upload PDFs</button></div></div>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section class="stats" aria-label="Database statistics">
+      <div class="stat"><div class="stat-label">Documents<svg class="icon"><use href="#i-document"/></svg></div><div class="stat-value" id="stat-documents">0</div><div class="stat-foot">Unique source files</div></div>
+      <div class="stat"><div class="stat-label">Stored chunks<svg class="icon"><use href="#i-grid"/></svg></div><div class="stat-value" id="stat-chunks">0</div><div class="stat-foot">Deduplicated by document</div></div>
+      <div class="stat"><div class="stat-label">Page manifests<svg class="icon"><use href="#i-activity"/></svg></div><div class="stat-value" id="stat-manifests">0</div><div class="stat-foot">Successful cold traces</div></div>
+      <div class="stat"><div class="stat-label">Source storage<svg class="icon"><use href="#i-database"/></svg></div><div class="stat-value" id="stat-bytes">0 <span>B</span></div><div class="stat-foot"><span class="mini-dot"></span> SQLite · in memory</div></div>
+    </section>
+    <section id="view-documents" class="view">
+      <div class="upload-zone" id="drop-zone"><span class="upload-icon"><svg class="icon"><use href="#i-upload"/></svg></span><div><strong>Drop your PDFs here, or <button id="browse-button" class="text-button">browse files</button></strong><p>PDF files up to 25 MB each. Original bytes are stored once.</p></div><div class="chunk-setting"><label for="chunk-size">CHUNK SIZE</label><select id="chunk-size"><option value="4096">4 KB</option><option value="16384" selected>16 KB</option><option value="65536">64 KB</option></select></div></div>
+      <div class="document-layout">
+        <section class="panel document-list-panel"><div class="panel-heading"><h2>Documents <span class="count-pill" id="list-count">0</span></h2><span class="small-muted">Current session</span></div><label class="search-box"><svg class="icon"><use href="#i-search"/></svg><input type="search" id="document-search" placeholder="Search name or document ID…" aria-label="Search documents"></label><div id="document-list" class="document-list"></div><div class="list-footer"><span class="status-dot"></span><span id="list-footer-text">Waiting for your first PDF</span></div></section>
+        <section class="panel inspector" id="inspector"><div class="empty-inspector"><div class="empty-art"><div class="art-line"></div><svg class="icon"><use href="#i-document"/></svg><span class="art-badge"><svg class="icon"><use href="#i-check"/></svg></span></div><span class="eyebrow">YOUR DEBUGGING STARTS HERE</span><h2>Every byte has a story.</h2><p>Upload a PDF to explore its storage, trace page dependencies, and verify a render against the original.</p><button class="button secondary" id="sample-button">Load sample PDF<svg class="icon"><use href="#i-arrow"/></svg></button><small>A three-page test fixture with sparse byte ranges</small></div></section>
+      </div>
+      <div class="bottom-note"><svg class="icon"><use href="#i-database"/></svg><span>Real SQLite. Original PDF bytes. Fresh renderer for every page trace.</span><a href="#schema" data-view="schema">Explore the schema <span>↗</span></a></div>
+    </section>
+    <section id="view-query" class="view" hidden><section class="panel"><div class="panel-heading"><h2><svg class="icon"><use href="#i-code"/></svg> Query editor</h2><span class="tag">READ ONLY</span></div><div class="query-toolbar"><label for="query-preset">Start with a query</label><select id="query-preset"><option value="documents">All documents</option><option value="manifests">Page manifests</option><option value="dependencies">Chunk dependencies</option><option value="storage">Storage by document</option></select><span class="small-muted">Up to 500 rows · 2-second limit</span></div><label class="sr-only" for="sql-editor">SQL query</label><textarea id="sql-editor" class="sql-editor" spellcheck="false">SELECT *
+FROM documents
+ORDER BY created_at DESC;</textarea><div class="query-actions"><span class="small-muted">⌘ / Ctrl + Enter to run</span><button class="button primary" id="run-query">Run query <span>▶</span></button></div></section><section class="panel results-panel"><div class="panel-heading"><h2>Results <span class="count-pill" id="result-count">—</span></h2><div class="row"><span id="query-time" class="small-muted"></span><button class="button small secondary" id="export-csv" disabled>Export CSV</button></div></div><div id="query-results" class="query-results"><div class="simple-empty">Run a query to inspect your database.</div></div></section></section>
+    <section id="view-schema" class="view" hidden><div class="schema-intro"><span class="tag">SQLITE</span><p>The application’s live tables, row counts, and constraints.</p></div><div id="schema-tables" class="schema-grid"></div></section>
+    <section id="view-activity" class="view" hidden><section class="panel"><div class="panel-heading"><h2>Session activity</h2><button class="button small secondary" id="clear-log">Clear log</button></div><div id="activity-list"></div></section><p class="small-muted activity-note">Activity is local to this browser tab and clears when you reload.</p></section>
+    <footer class="main-footer"><span>PDF Workbench <span class="footer-divider">/</span> An internal development tool</span><span id="renderer-version">PDF.js · SQLite</span></footer>
+  </main>
+</div>
+<input type="file" id="file-input" accept="application/pdf,.pdf" multiple hidden>
+<dialog id="confirm-dialog"><form method="dialog"><div class="dialog-icon"><svg class="icon"><use href="#i-refresh"/></svg></div><h2 id="confirm-title">Reset session?</h2><p id="confirm-description">This removes all PDFs and page manifests from the in-memory database.</p><div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button danger" value="confirm" id="confirm-submit">Reset session</button></div></form></dialog>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -2,8 +2,12 @@
   "name": "pdf-range-index",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24.0.0" },
-  "scripts": { "test": "node test/index.test.mjs" },
+  "engines": { "node": ">=24.19.0" },
+  "scripts": {
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "test": "node --test test/index.test.mjs test/server.test.mjs"
+  },
   "dependencies": {
     "@napi-rs/canvas": "1.1.0",
     "pdfjs-dist": "6.4.299"
