@@ -1,7 +1,7 @@
 import { clientRequest, getDocumentBytes, readDocumentRange, getTracedPageSource } from './client-db.js';
 import { createReader } from './reader-shell.js';
 import { renderSqlResults } from './sql-results.js';
-import { createPdfPageCells } from './pdf-page-cells.js';
+import { createPdfPageCells, PDF_PAGE_WIDTHS } from './pdf-page-cells.js';
 
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -17,6 +17,7 @@ let pending = false, queryPending = false, queryGeneration = 0, logs = [], query
 let pdfjs, previewTask, previewDoc, previewId, renderTask, previewGeneration = 0, detailGeneration = 0;
 let previewZoom = 'fit', previewSize = '', previewResizeTimer;
 let disposeQueryResults = () => {};
+let queryPages = null, pageCellWidth = 320;
 const reader = createReader({
   readRange: readDocumentRange,
   onShowWorkbench: async (id, currentPage) => {
@@ -34,7 +35,7 @@ async function openReader() {
   catch (error) { notify(error.message, 'error'); log(error.message, true); }
 }
 const presets = {
-  pages: "SELECT u.filename, m.page_number,\n       'pdf:v1:' || m.document_id || ':' || m.profile_id\n       || ':' || m.page_number AS pdf_page\nFROM page_manifests m\nJOIN upload_metadata u USING (document_id)\nORDER BY u.filename, m.page_number;",
+  pages: "SELECT u.filename, m.page_number, m.ref AS pdf_page\nFROM page_manifests m\nJOIN upload_metadata u USING (document_id)\nORDER BY u.filename, m.page_number;",
   documents: 'SELECT d.document_id, u.filename, d.byte_length,\n       d.chunk_size, u.page_count, d.created_at\nFROM documents d\nJOIN upload_metadata u USING (document_id)\nORDER BY d.created_at DESC;',
   manifests: 'SELECT page_number, page_count, width, height,\n       observed_bytes, pixel_sha256\nFROM page_manifests\nORDER BY document_id, page_number;',
   dependencies: 'SELECT document_id, page_number, chunk_number\nFROM page_dependencies\nORDER BY document_id, page_number, chunk_number;',
@@ -355,7 +356,7 @@ async function loadSchema() {
   try {
     const {tables} = await api('/schema');
     if (generation !== schemaGeneration) return;
-    $('#schema-tables').innerHTML=tables.map(t=>`<section class="panel schema-card"><div class="panel-heading"><h2>${icon('database')}${escapeHtml(t.name)}</h2><span class="count-pill">${number(t.rowCount)} rows</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Column</th><th>Type</th><th>Constraint</th></tr></thead><tbody>${t.columns.map(c=>`<tr><td class="monospace">${escapeHtml(c.name)}</td><td>${escapeHtml(c.type)}</td><td>${c.pk?'PRIMARY KEY':c.notnull?'NOT NULL':'—'}</td></tr>`).join('')}</tbody></table></div><details><summary>View CREATE TABLE statement</summary><pre>${escapeHtml(t.sql)}</pre></details></section>`).join('');
+    $('#schema-tables').innerHTML=tables.map(t=>`<section class="panel schema-card"><div class="panel-heading"><h2>${icon('database')}${escapeHtml(t.name)}</h2><span class="count-pill">${number(t.rowCount)} rows</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Column</th><th>Type</th><th>Constraint</th></tr></thead><tbody>${t.columns.map(c=>`<tr><td class="monospace">${escapeHtml(c.name)}</td><td>${escapeHtml(c.type)}</td><td>${c.generated?'GENERATED':c.pk?'PRIMARY KEY':c.notnull?'NOT NULL':'—'}</td></tr>`).join('')}</tbody></table></div><details><summary>View CREATE TABLE statement</summary><pre>${escapeHtml(t.sql)}</pre></details></section>`).join('');
   } catch (error) {
     if (generation === schemaGeneration) $('#schema-tables').innerHTML = `<div class="query-error">Unable to load schema: ${escapeHtml(error.message)}</div>`;
   }
@@ -363,6 +364,7 @@ async function loadSchema() {
 function clearQueryResults(message) {
   disposeQueryResults();
   disposeQueryResults = () => {};
+  queryPages = null;
   queryResult = null;
   ++queryGeneration;
   const empty = document.createElement('div');
@@ -385,7 +387,8 @@ async function runQuery() {
     queryResult=result;
     $('#result-count').textContent=`${result.rows.length}${result.truncated?'+':''}`;
     $('#query-time').textContent=`${result.elapsedMs.toFixed(1)} ms${result.truncated?' · results truncated':''}`;
-    const pages = createPdfPageCells({
+    const pages = queryPages = createPdfPageCells({
+      width: pageCellWidth,
       resolvePage: getTracedPageSource,
       readRange: readDocumentRange,
       onOpen: (sourceDocument, pageNumber) => reader.open(sourceDocument, pageNumber),
@@ -480,6 +483,12 @@ window.addEventListener('drop',event=>event.preventDefault());
 $('#document-search').oninput=renderDocuments;
 $('#reset-button').onclick=resetSession;
 $('#schema-reference').addEventListener('toggle', refreshSchema);
+const pageWidthMenu = $('#page-cell-width');
+for (const width of PDF_PAGE_WIDTHS) pageWidthMenu.add(new Option(`${width} px`, String(width), false, width === pageCellWidth));
+pageWidthMenu.onchange = () => {
+  pageCellWidth = Number(pageWidthMenu.value);
+  queryPages?.setWidth(pageCellWidth);
+};
 $('#query-preset').onchange=()=>$('#sql-editor').value=presets[$('#query-preset').value];
 $('#run-query').onclick=runQuery;
 $('#export-csv').onclick=exportCsv;

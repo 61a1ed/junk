@@ -72,8 +72,16 @@ try {
   await readyCells(2);
   assert.equal(await page.evaluate(() => window.__loads.length), 1, 'Two pages of one PDF share a loading task');
   assert.equal(await page.evaluate(() => window.__reads.some(r => r.action === 'source')), false, 'Cells must use range storage');
-  const geometry = await page.locator('.pdf-cell-stage').evaluateAll(stages => stages.map(stage => ({ width: stage.offsetWidth, height: stage.offsetHeight })));
-  assert.deepEqual(geometry, [{ width: 320, height: 420 }, { width: 320, height: 420 }]);
+  const geometry = await page.locator('.pdf-cell-stage').evaluateAll(stages => stages.map(stage => {
+    const page = stage.querySelector('.page').getBoundingClientRect();
+    return { width: stage.offsetWidth, height: stage.offsetHeight, pageRatio: page.width / page.height };
+  }));
+  assert.deepEqual(geometry.map(g => g.width), [320, 320]);
+  assert.ok(geometry[0].height > geometry[1].height, 'Portrait and landscape must have natural, different heights');
+  assert.ok(Math.abs(geometry[0].pageRatio - 612 / 792) < .01);
+  assert.ok(Math.abs(geometry[1].pageRatio - 792 / 612) < .01);
+  assert.equal(await page.locator('.pdf-cell-label').count(), 0);
+  assert.equal(await page.locator('#query-results [title^="pdf:v1:"]').count(), 0);
   const selection = await page.locator('.pdf-page-cell .textLayer').first().evaluate(layer => {
     const range = document.createRange(); range.selectNodeContents(layer);
     const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
@@ -92,7 +100,7 @@ try {
   assert.deepEqual(await sidebarStyle(), initialSidebar, 'PDF component styles must not affect the workbench');
   assert.equal(await page.locator('.pdf-page-cell .annotationLayer').count(), 0);
   await page.screenshot({ path: '/tmp/pdf-sql-grid.png', fullPage: true });
-  step('two fixed-size selectable cells share a range-backed PDF.js document');
+  step('selectable cells share one document and preserve page proportions without metadata labels');
 
   const downloadEvent = page.waitForEvent('download');
   await page.locator('#export-csv').click();
@@ -100,20 +108,68 @@ try {
   assert.ok(csv.includes(a1) && csv.includes(a2), 'CSV must contain raw addresses');
   step('CSV exports the original page addresses');
 
-  await page.getByRole('button', { name: 'Open document at page 2', exact: true }).click();
+  assert.deepEqual(await page.locator('#page-cell-width option').evaluateAll(options => options.map(o => o.value)), ['240', '320', '480', '640', '800']);
+  await page.getByRole('combobox', { name: 'Page width', exact: true }).selectOption('480');
+  await readyCells(2);
+  assert.deepEqual(await page.locator('.pdf-cell-stage').evaluateAll(stages => stages.map(s => s.offsetWidth)), [480, 480]);
+  await page.getByRole('combobox', { name: 'Page width', exact: true }).selectOption('320');
+  await readyCells(2);
+  step('the width menu resizes existing cells while preserving natural height');
+
+  const popupReady = () => page.waitForFunction(() => document.querySelector('.pdf-page-popup .pdf-page-cell[aria-busy="false"] .textLayer'));
+  const enlarge = async number => {
+    const button = page.getByRole('button', { name: `Enlarge page ${number}`, exact: true });
+    await button.scrollIntoViewIfNeeded();
+    await button.click();
+    await popupReady();
+  };
+  const loadsBeforePopup = await page.evaluate(() => window.__loads.length);
+  await enlarge(2);
+  assert.equal(await page.locator('#pdf-reader').isVisible(), false, 'Enlargement must not open the official reader');
+  assert.equal(await page.evaluate(() => !!document.querySelector('#pdf-reader-frame')?.contentWindow.PDFViewerApplication), false);
+  assert.equal(await page.evaluate(() => window.__loads.length), loadsBeforePopup, 'Popup shares the grid document');
+  const popupBounds = await page.locator('.pdf-page-popup').boundingBox();
+  assert.ok(popupBounds.width > 1400 && popupBounds.height > 1000);
+  const largePage = await page.locator('.pdf-page-popup .page').boundingBox();
+  assert.ok(largePage.width > 600 && Math.abs(largePage.width / largePage.height - 792 / 612) < .01);
+  assert.match(await page.locator('.pdf-page-popup .textLayer').textContent(), /Reading preview - page 2/);
+  const popupSelection = await page.locator('.pdf-page-popup .textLayer').evaluate(layer => {
+    const range = document.createRange(); range.selectNodeContents(layer);
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    const text = selection.toString(); selection.removeAllRanges(); return text;
+  });
+  assert.match(popupSelection, /twelve-point Helvetica/);
+  await page.screenshot({ path: '/tmp/pdf-page-popup.png' });
+  await page.setViewportSize({ width: 1100, height: 900 });
+  await page.waitForFunction(() => {
+    const cell = document.querySelector('.pdf-page-popup .pdf-page-cell');
+    const stage = cell?.querySelector('.pdf-cell-stage').getBoundingClientRect();
+    const page = cell?.querySelector('.page')?.getBoundingClientRect();
+    return cell?.getAttribute('aria-busy') === 'false' && page && page.width < stage.width && page.height < stage.height;
+  });
+  await page.setViewportSize({ width: 1500, height: 1100 });
+  await page.keyboard.press('Escape');
+  await page.locator('.pdf-page-popup').waitFor({ state: 'detached' });
+  assert.equal(await page.getByRole('button', { name: 'Enlarge page 2', exact: true }).evaluate(el => el === document.activeElement), true);
+  await enlarge(2);
+  await page.getByRole('button', { name: 'Open full reader', exact: true }).click();
   await page.waitForFunction(() => {
     const app = document.querySelector('#pdf-reader-frame')?.contentWindow.PDFViewerApplication;
     return app?.page === 2 && app.pdfViewer.getPageView(1)?.renderingState === 3 && !document.querySelector('#workbench-overlay').open;
   });
   await page.locator('#show-workbench').click();
+  await enlarge(1);
+  await page.keyboard.press('Escape');
+  await page.locator('.pdf-page-popup').waitFor({ state: 'detached' });
+  assert.equal(await page.locator('#workbench-overlay').evaluate(el => el.open), true, 'Escape must only close the top preview');
   await page.locator('#exit-reader').click();
   await page.locator('#pdf-reader-frame').waitFor({ state: 'detached' });
-  step('cell navigation opens the complete official reader at the requested page');
+  step('the large preview shares the document, closes independently, and opens the full reader at the requested page');
 
+  await page.evaluate(() => { window.__loads = []; });
   await run(`SELECT ${sqlLiteral(a1)} AS pdf_a, ${sqlLiteral(b1)} AS pdf_b`);
   await readyCells(2);
-  assert.match(await page.locator('.pdf-cell-label').nth(0).textContent(), /reading.pdf/);
-  assert.match(await page.locator('.pdf-cell-label').nth(1).textContent(), /second.pdf/);
+  assert.equal(await page.evaluate(() => window.__loads.length), 2);
   await run(`SELECT ${sqlLiteral(a1)} AS pdf_a, ${sqlLiteral(a1)} AS pdf_b`);
   await readyCells(2);
   step('mixed documents and duplicate page coordinates render independently');
@@ -137,12 +193,15 @@ try {
     SELECT x, ${sqlLiteral(a1)} AS pdf_page FROM n`);
   await page.waitForFunction(() => document.querySelector('.pdf-page-cell[aria-busy="false"]'));
   assert.ok(await page.locator('.pdf-page-cell .textLayer').count() < 5, 'Offscreen rows should not render');
-  await page.locator('#query-results').evaluate(el => { el.scrollTop = el.scrollHeight; });
+  const resultsHeight = await page.locator('#query-results').evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight, maxHeight: getComputedStyle(el).maxHeight }));
+  assert.ok(resultsHeight.height > 7000 && resultsHeight.scrollHeight <= resultsHeight.height + 1);
+  assert.equal(resultsHeight.maxHeight, 'none');
+  await page.locator('#query-results tr').last().scrollIntoViewIfNeeded();
   await page.waitForFunction(() => {
     const cells = [...document.querySelectorAll('.pdf-page-cell')];
     return !cells[0].querySelector('canvas') && cells.at(-1).querySelector('.textLayer') && cells.at(-1).getAttribute('aria-busy') === 'false';
   });
-  step('scrolling renders visible rows and releases offscreen canvases');
+  step('unbounded-height results scroll with the document and release offscreen canvases');
 
   await page.evaluate(() => { window.__holdPageSource = true; });
   await run(`SELECT ${sqlLiteral(a1)} AS pdf_delayed`);
@@ -155,9 +214,20 @@ try {
   step('late page replies cannot restore replaced query results');
 
   await page.locator('#query-preset').selectOption('pages');
+  assert.match(await page.locator('#sql-editor').inputValue(), /m\.ref AS pdf_page/);
   await page.locator('#run-query').click();
   await page.waitForFunction(() => !document.querySelector('#run-query').disabled);
   assert.equal(await page.locator('#query-results tbody tr').count(), 3);
+  const refs = await page.evaluate(async () => {
+    const { clientRequest } = await import('/client-db.js');
+    const [result, schema] = await Promise.all([
+      clientRequest('/query', { method: 'POST', body: { sql: 'SELECT ref FROM page_manifests ORDER BY ref' } }),
+      clientRequest('/schema'),
+    ]);
+    return { values: result.rows.flat(), generated: schema.tables.find(t => t.name === 'page_manifests').columns.find(c => c.name === 'ref').generated };
+  });
+  assert.deepEqual(refs.values, [a1, a2, b1].sort());
+  assert.equal(refs.generated, true);
   await page.waitForFunction(() => document.querySelector('.pdf-page-cell[aria-busy="false"]'));
   await page.locator('#reset-button').click();
   await page.locator('#confirm-submit').click();

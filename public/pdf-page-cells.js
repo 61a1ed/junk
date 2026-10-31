@@ -1,6 +1,8 @@
 import { decodePdfAddress } from './pdf-address.js';
 import { createRangeSource } from './reader-transport.js';
 
+export const PDF_PAGE_WIDTHS = Object.freeze([240, 320, 480, 640, 800]);
+
 let components;
 async function loadComponents() {
   return components ??= (async () => {
@@ -23,11 +25,13 @@ async function loadComponents() {
 
 // Storage and navigation are injected; this module knows nothing about SQL,
 // result columns, the inspector, or the database implementation.
-export function createPdfPageCells({ resolvePage, readRange, onOpen }) {
+export function createPdfPageCells({ resolvePage, readRange, onOpen, width = 320 }) {
+  if (!PDF_PAGE_WIDTHS.includes(width)) throw new Error('Unsupported page width');
   const documents = new Map();
   const cells = new Map();
   const queue = [];
   let running = 0, disposed = false;
+  let popup = null;
 
   function acquire(sourceDocument) {
     const id = sourceDocument.document_id;
@@ -75,7 +79,7 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen }) {
     };
   }
 
-  function release(cell) {
+  function release(cell, keepDocument = false) {
     ++cell.generation;
     cell.cancelText?.();
     cell.cancelText = null;
@@ -84,8 +88,10 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen }) {
     cell.view?.reset();
     void cell.view?.l10n.destroy().catch(() => {});
     cell.view = null;
-    cell.lease?.release();
-    cell.lease = null;
+    if (!keepDocument) {
+      cell.lease?.release();
+      cell.lease = null;
+    }
     cell.stage.replaceChildren();
     cell.card.removeAttribute('aria-busy');
     cell.open.disabled = true;
@@ -97,19 +103,23 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen }) {
     cell.status.textContent = 'Loading page…';
     cell.card.setAttribute('aria-busy', 'true');
     try {
-      const [{ document: sourceDocument }, { pdfjs, PDFPageView, EventBus }] = await Promise.all([
+      const [{ document: sourceDocument, manifest }, { pdfjs, PDFPageView, EventBus }] = await Promise.all([
         resolvePage(cell.address), loadComponents(),
       ]);
       if (!current()) return;
-      cell.label.textContent = `${sourceDocument.filename} · Page ${cell.address.pageNumber}`;
-      cell.lease = acquire(sourceDocument);
+      cell.stage.style.setProperty('--pdf-page-ratio', manifest.width / manifest.height);
+      cell.lease ||= acquire(sourceDocument);
       const pdf = await cell.lease.promise;
       if (!current()) return;
       const pdfPage = await pdf.getPage(cell.address.pageNumber);
       if (!current()) return;
       const viewport = pdfPage.getViewport({ scale: 1 });
-      // Fit within the fixed 320 × 420 stage, allowing for padding and border.
-      const cssScale = Math.min(300 / viewport.width, 400 / viewport.height);
+      cell.stage.style.setProperty('--pdf-page-ratio', viewport.width / viewport.height);
+      // Grid pages fit the chosen width and grow naturally in height. Only the
+      // near-fullscreen preview fits both dimensions of its available space.
+      const cssScale = cell.expanded
+        ? Math.min((cell.stage.clientWidth - 20) / viewport.width, (cell.stage.clientHeight - 20) / viewport.height)
+        : (width - 20) / viewport.width;
       const eventBus = new EventBus();
       const view = cell.view = new PDFPageView({
         container: cell.stage, id: cell.address.pageNumber, eventBus,
@@ -164,7 +174,8 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen }) {
   function enqueue(cell) {
     if (disposed || cell.removed || !cell.visible || cell.queued || cell.rendering || cell.view || cell.failed) return;
     cell.queued = true;
-    queue.push(cell);
+    if (cell.expanded) queue.unshift(cell);
+    else queue.push(cell);
     pump();
   }
   const observer = new IntersectionObserver(entries => {
@@ -181,6 +192,100 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen }) {
     }
   });
 
+  function createCell(address, expanded = false) {
+    const card = document.createElement('section');
+    card.className = 'pdf-page-cell';
+    card.style.setProperty('--pdf-cell-width', `${width}px`);
+    const stage = document.createElement('div');
+    stage.className = 'pdf-cell-stage pdfViewer';
+    const status = document.createElement('div');
+    status.className = 'pdf-cell-status';
+    status.setAttribute('role', 'status');
+    status.textContent = 'Scroll into view to load page';
+    const open = document.createElement('button');
+    open.className = 'button small secondary';
+    open.textContent = expanded ? 'Open full reader' : 'Enlarge';
+    open.disabled = true;
+    open.setAttribute('aria-label', expanded ? 'Open full reader' : `Enlarge page ${address.pageNumber}`);
+    const footer = document.createElement('div');
+    footer.className = 'pdf-cell-footer';
+    footer.append(status, open);
+    card.append(stage, footer);
+    const cell = { address, card, stage, status, open, generation: 0, visible: expanded, expanded };
+    cells.set(card, cell);
+    return cell;
+  }
+
+  function closePopup() {
+    if (!popup) return;
+    const previous = popup;
+    popup = null;
+    clearTimeout(previous.timer);
+    previous.resize.disconnect();
+    previous.cell.removed = true;
+    cells.delete(previous.cell.card);
+    release(previous.cell);
+    previous.cell.open.onclick = null;
+    previous.dialog.close();
+    previous.dialog.remove();
+    if (previous.origin.open.isConnected) previous.origin.open.focus({ preventScroll: true });
+  }
+
+  function enlarge(origin) {
+    closePopup();
+    const dialog = document.createElement('dialog');
+    dialog.className = 'pdf-page-popup';
+    dialog.setAttribute('aria-label', 'Page preview');
+    const cell = createCell(origin.address, true);
+    const close = document.createElement('button');
+    close.className = 'button small secondary';
+    close.textContent = 'Close preview';
+    close.autofocus = true;
+    close.onclick = closePopup;
+    cell.card.querySelector('.pdf-cell-footer').append(close);
+    dialog.append(cell.card);
+    document.body.append(dialog);
+    dialog.addEventListener('cancel', event => { event.preventDefault(); closePopup(); });
+    dialog.addEventListener('close', () => { if (popup?.dialog === dialog) closePopup(); });
+    dialog.addEventListener('click', event => {
+      const rect = dialog.getBoundingClientRect();
+      if (event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right ||
+          event.clientY < rect.top || event.clientY > rect.bottom)) closePopup();
+    });
+    cell.open.onclick = async () => {
+      const generation = cell.generation;
+      cell.open.disabled = true;
+      try {
+        // Revalidate in case the source was deleted after the result was read.
+        const { document: sourceDocument } = await resolvePage(cell.address);
+        if (disposed || cell.removed || generation !== cell.generation) return;
+        closePopup();
+        await onOpen(sourceDocument, cell.address.pageNumber);
+      } catch (error) {
+        if (!disposed && !origin.removed) (cell.removed ? origin.status : cell.status).textContent = error.message;
+      } finally {
+        if (!disposed && !cell.removed && cell.view) cell.open.disabled = false;
+      }
+    };
+    const resize = new ResizeObserver(() => {
+      if (popup?.cell !== cell) return;
+      const size = `${cell.stage.clientWidth}:${cell.stage.clientHeight}`;
+      if (popup.size === size) return;
+      popup.size = size;
+      clearTimeout(popup.timer);
+      popup.timer = setTimeout(() => {
+        if (popup?.cell !== cell) return;
+        release(cell, true);
+        enqueue(cell);
+      }, 100);
+    });
+    popup = { dialog, cell, origin, resize };
+    dialog.showModal();
+    popup.size = `${cell.stage.clientWidth}:${cell.stage.clientHeight}`;
+    resize.observe(cell.stage);
+    enqueue(cell);
+  }
+
   function mount(container, value) {
     let address;
     try { address = decodePdfAddress(value); }
@@ -191,57 +296,35 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen }) {
       container.append(message); // Preserve the original invalid value.
       return () => message.remove();
     }
-    const card = document.createElement('section');
-    card.className = 'pdf-page-cell';
-    card.title = value;
-    const label = document.createElement('div');
-    label.className = 'pdf-cell-label';
-    label.textContent = `Page ${address.pageNumber}`;
-    const stage = document.createElement('div');
-    stage.className = 'pdf-cell-stage pdfViewer';
-    const status = document.createElement('div');
-    status.className = 'pdf-cell-status';
-    status.setAttribute('role', 'status');
-    status.textContent = 'Scroll into view to load page';
-    const open = document.createElement('button');
-    open.className = 'button small secondary';
-    open.textContent = 'Open reader';
-    open.disabled = true;
-    open.setAttribute('aria-label', `Open document at page ${address.pageNumber}`);
-    const footer = document.createElement('div');
-    footer.className = 'pdf-cell-footer';
-    footer.append(status, open);
-    card.append(label, stage, footer);
-    container.replaceChildren(card);
-    const cell = { address, card, label, stage, status, open, generation: 0, visible: false };
-    cells.set(card, cell);
-    open.onclick = async () => {
-      const generation = cell.generation;
-      open.disabled = true;
-      try {
-        // Revalidate in case the source was deleted after the result was read.
-        const { document: sourceDocument } = await resolvePage(address);
-        if (disposed || cell.removed || generation !== cell.generation) return;
-        await onOpen(sourceDocument, address.pageNumber);
-      } catch (error) {
-        if (!disposed && !cell.removed) status.textContent = error.message;
-      } finally {
-        if (!disposed && !cell.removed && cell.view) open.disabled = false;
-      }
-    };
-    observer.observe(card);
+    const cell = createCell(address);
+    container.replaceChildren(cell.card);
+    cell.open.onclick = () => enlarge(cell);
+    observer.observe(cell.card);
     return () => {
+      if (popup?.origin === cell) closePopup();
       cell.removed = true;
-      observer.unobserve(card);
-      cells.delete(card);
+      observer.unobserve(cell.card);
+      cells.delete(cell.card);
       release(cell);
-      open.onclick = null;
+      cell.open.onclick = null;
     };
   }
   return {
     mount,
+    setWidth(nextWidth) {
+      if (!PDF_PAGE_WIDTHS.includes(nextWidth)) throw new Error('Unsupported page width');
+      if (width === nextWidth || disposed) return;
+      width = nextWidth;
+      for (const cell of cells.values()) {
+        if (cell.expanded) continue;
+        cell.card.style.setProperty('--pdf-cell-width', `${width}px`);
+        release(cell, true);
+        enqueue(cell);
+      }
+    },
     dispose() {
       disposed = true;
+      closePopup();
       observer.disconnect();
       queue.length = 0;
       for (const cell of cells.values()) {

@@ -256,7 +256,9 @@ async function handle(action, payload = {}) {
         const name = `"${table.name.replaceAll('"', '""')}"`;
         return {
           ...table,
-          columns: rows(`PRAGMA table_info(${name})`).map(({ name, type, pk, notnull }) => ({ name, type, pk, notnull })),
+          columns: rows(`PRAGMA table_xinfo(${name})`).map(({ name, type, pk, notnull, hidden }) => ({
+            name, type, pk, notnull, generated: hidden === 2 || hidden === 3,
+          })),
           rowCount: one(`SELECT count(*) AS n FROM ${name}`).n,
         };
       }) };

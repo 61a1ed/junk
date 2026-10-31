@@ -36,12 +36,12 @@ or SQL ordering/filtering to choose an arbitrary collection across documents.
 
 The address format is `pdf:v1:<document-id>:<profile-id>:<page-number>`. Both IDs
 are lowercase 64-character SHA-256 hashes; the page number is a positive,
-1-based decimal integer. For example:
+1-based decimal integer. `page_manifests.ref` is a virtual generated column
+containing this address, including for existing Node databases opened by the
+CLI. Alias it to a name starting with `pdf` to render it:
 
 ```sql
-SELECT u.filename, m.page_number,
-       'pdf:v1:' || m.document_id || ':' || m.profile_id
-       || ':' || m.page_number AS pdf_page
+SELECT u.filename, m.page_number, m.ref AS pdf_page
 FROM page_manifests m
 JOIN upload_metadata u USING (document_id)
 ORDER BY u.filename, m.page_number;
@@ -52,9 +52,17 @@ addresses remain visible with an explanation; missing documents or traces show
 a per-cell error. NULL stays NULL. Rendering never creates a trace. CSV export
 always contains the original SQL values, including encoded addresses.
 
-Each cell fits a `PDFPageView` into a fixed 320 × 420 CSS-pixel stage with a
-selectable text layer. **Open reader** opens the whole original document at
-that page. Annotations and editing remain in the official reader. Cells render
+Choose a **Page width** of 240, 320 (default), 480, 640, or 800 CSS pixels in the
+results toolbar. Each cell renders a selectable `PDFPageView` at that width;
+its height follows the page's aspect ratio, with no fixed or maximum height.
+Results grow with their rows, with horizontal scrolling when needed. Cells do
+not repeat filenames, page numbers, or addresses; include those as ordinary SQL
+columns if useful.
+
+**Enlarge** opens the same page in a near-fullscreen modal with selectable text,
+sharing the grid's PDF.js document. Escape or **Close preview** returns to the
+table. **Open full reader** in that modal opens the whole original document at
+the selected page. Annotations and editing remain in the official reader. Cells render
 only when visible, with at most two page renders in progress, and share one
 PDF.js document per source PDF while its cells are active. Leaving the viewport,
 replacing results, deleting a document, or resetting releases cell resources.

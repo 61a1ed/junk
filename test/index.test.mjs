@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { createCanvas } from '@napi-rs/canvas';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import {
@@ -9,6 +12,31 @@ import {
 } from '../index.mjs';
 import { makeFixturePdf, makeIncrementalFixturePdf, makeObjectStreamFixturePdf } from './fixture.mjs';
 import { pdfjsAssetDirectory } from '../pdfjs-assets.mjs';
+import { encodePdfAddress } from '../public/pdf-address.js';
+
+await test('page refs are generated and older databases gain them without retracing', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'pdf-ref-'));
+  const filename = path.join(directory, 'pages.sqlite');
+  let db = openDatabase(filename);
+  try {
+    const id = putDocument(db, makeFixturePdf());
+    const traced = await indexPage(db, id, 2);
+    const expected = encodePdfAddress({ documentId: id, profileId: PROFILE_ID, pageNumber: 2 });
+    const read = () => db.prepare('SELECT ref, pixel_sha256 FROM page_manifests').get();
+    assert.equal(read().ref, expected);
+    assert.throws(() => db.prepare("UPDATE page_manifests SET ref = 'incorrect'").run(), /generated column/);
+    // Simulate a pre-ref database, retaining the original trace and chunks.
+    db.exec('ALTER TABLE page_manifests DROP COLUMN ref');
+    db.close();
+    db = openDatabase(filename);
+    assert.equal(read().ref, expected);
+    assert.equal(read().pixel_sha256, traced.pixelSha256);
+    assert.equal(db.prepare('PRAGMA table_xinfo(page_manifests)').all().find(c => c.name === 'ref').hidden, 2);
+  } finally {
+    db.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 async function fullFilePixelHash(bytes, pageNumber) {
   const task = pdfjs.getDocument({

@@ -35,6 +35,12 @@ export const PROFILE_ID = sha256(JSON.stringify(PROFILE));
 export function openDatabase(filename) {
   const db = new DatabaseSync(filename);
   db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  // CREATE TABLE IF NOT EXISTS also opens databases made before page refs.
+  if (!db.prepare('PRAGMA table_xinfo(page_manifests)').all().some(column => column.name === 'ref')) {
+    db.exec(`ALTER TABLE page_manifests ADD COLUMN ref TEXT GENERATED ALWAYS AS (
+      'pdf:v1:' || document_id || ':' || profile_id || ':' || page_number
+    ) VIRTUAL`);
+  }
   db.exec('PRAGMA busy_timeout = 5000');
   return db;
 }

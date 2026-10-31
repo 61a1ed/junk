@@ -1,24 +1,22 @@
 .pdf-page-cell {
-  width: 320px;
+  width: var(--pdf-cell-width, 320px);
   font: 11px/1.4 system-ui, sans-serif;
   color: #35473a;
   white-space: normal;
 }
-.pdf-cell-label {
-  padding: 0 0 8px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .pdf-page-cell .pdf-cell-stage {
-  width: 320px;
-  height: 420px;
+  width: 100%;
   padding: 8px;
-  overflow: auto;
   background: #eef1ec;
   border: 1px solid #dce3de;
   border-radius: 4px;
   color-scheme: light;
+}
+/* Reserve a plausible page footprint before its trace dimensions arrive. */
+.pdf-cell-stage:empty::before {
+  content: '';
+  display: block;
+  aspect-ratio: var(--pdf-page-ratio, 0.773);
 }
 .pdf-page-cell .pdfViewer .page {
   margin: 0 auto;
@@ -32,7 +30,40 @@
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  min-height: 42px;
+  min-height: 38px;
 }
 .pdf-cell-status { flex: 1; color: #64745b; font-size: 10px; }
 .pdf-cell-error { margin-top: 6px; color: #a55440; font: 11px/1.5 system-ui, sans-serif; }
+.result-controls { flex-wrap: wrap; justify-content: flex-end; }
+.result-controls label { font-size: 11px; }
+.data-table td:has(> .pdf-page-cell) { max-width: none; }
+/* The dialog reuses the same page component and document pool as the cells. */
+body:has(.pdf-page-popup[open]) { overflow: hidden; }
+.pdf-page-popup {
+  width: calc(100vw - 40px);
+  height: calc(100dvh - 40px);
+  max-width: none;
+  max-height: none;
+  padding: 12px;
+  border: 1px solid #c9d3ca;
+  border-radius: 8px;
+  background: #f5f7f5;
+  overflow: hidden;
+}
+.pdf-page-popup::backdrop { background: #18271eb3; }
+.pdf-page-popup .pdf-page-cell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.pdf-page-popup .pdf-cell-footer { order: -1; flex: none; padding-bottom: 8px; }
+.pdf-page-popup .pdf-cell-stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+}
+.pdf-page-popup .pdf-cell-stage:empty::before { content: none; }
+.pdf-page-popup .pdfViewer .page { margin: auto; flex: none; }

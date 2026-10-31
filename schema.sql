@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS page_manifests (
     pixel_sha256 TEXT NOT NULL,
     observed_bytes INTEGER NOT NULL CHECK (observed_bytes > 0),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ref TEXT GENERATED ALWAYS AS (
+        'pdf:v1:' || document_id || ':' || profile_id || ':' || page_number
+    ) VIRTUAL,
     PRIMARY KEY (document_id, profile_id, page_number)
 ) STRICT, WITHOUT ROWID;
 
