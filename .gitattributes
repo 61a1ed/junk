@@ -1,2 +1,0 @@
-# Preserve the official PDF.js distribution exactly and collapse it in reviews.
-public/pdfjs/** linguist-vendored -whitespace

@@ -1,4 +1,4 @@
-import { clientRequest, getDocumentBytes } from './client-db.js';
+import { clientRequest, getDocumentBytes, readDocumentRange } from './client-db.js';
 import { createReader } from './reader-shell.js';
 
 const $ = selector => document.querySelector(selector);
@@ -15,7 +15,7 @@ let pending = false, queryPending = false, queryGeneration = 0, logs = [], query
 let pdfjs, previewTask, previewDoc, previewId, renderTask, previewGeneration = 0, detailGeneration = 0;
 let previewZoom = 'fit', previewSize = '', previewResizeTimer;
 const reader = createReader({
-  getBytes: getDocumentBytes,
+  readRange: readDocumentRange,
   onShowWorkbench: async (id, currentPage) => {
     if (selectedId !== id) await selectDocument(id, true);
     if (!reader.active || reader.documentId !== id || selectedId !== id || !detail) return;

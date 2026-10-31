@@ -41,7 +41,7 @@
     ready: initialized.promise,
     get pageNumber() { return application?.page ?? 1; },
     set pageNumber(value) { setPage(value); },
-    open({ data, filename, pageNumber = 1 }) {
+    open({ byteLength, chunkSize, readRange, filename, pageNumber = 1 }) {
       const request = ++generation;
       opening = true;
       queue = queue.catch(() => {}).then(async () => {
@@ -50,29 +50,52 @@
         const initialView = Promise.withResolvers();
         const onInitialView = () => initialView.resolve();
         application.eventBus.on('documentinit', onInitialView);
+        let source;
         try {
-          application.initialBookmark = `page=${Number.isSafeInteger(pageNumber) ? Math.max(1, pageNumber) : 1}`;
-          // Create the typed array in the reader's realm; PDF.js may transfer it
-          // to its worker, leaving the workbench's original bytes untouched.
-          await application.open({ data: new Uint8Array(data), filename });
-          await application.pdfViewer.firstPagePromise;
-          await initialView.promise;
-          // Match the generic viewer's FORCE_PAGES_LOADED_TIMEOUT: readable
-          // pages must not wait forever for metadata from every other page.
-          let pagesTimer;
-          try {
-            await Promise.race([
-              application.pdfViewer.pagesPromise,
-              new Promise(resolve => { pagesTimer = setTimeout(resolve, 10000); }),
-            ]).catch(() => {}); // The stock viewer reports individual page errors.
-          } finally {
-            clearTimeout(pagesTimer);
-          }
-          // PDF.js reapplies the initial view after discovering mixed page sizes.
-          // Let that finish before applying the workbench's requested page.
-          await new Promise(resolve => requestAnimationFrame(resolve));
-          if (request !== generation) return;
-          setPage(pageNumber);
+          const { createRangeSource } = await import('/reader-transport.js');
+          source = await createRangeSource(window.pdfjsLib, {
+            byteLength, chunkSize, readRange, filename,
+            onError(error) {
+              // Rejecting an async range callback does not reject PDF.js's wait.
+              if (source) void application.pdfLoadingTask?.destroy().catch(() => {});
+              if (!opening) emit('pdf-workbench-reader-error', { message: error.message });
+            },
+          });
+          if (request !== generation) { source.abort(); return; }
+          const load = async () => {
+            application.initialBookmark = `page=${Number.isSafeInteger(pageNumber) ? Math.max(1, pageNumber) : 1}`;
+            application.setTitleUsingUrl(filename);
+            await application.open({
+              range: source.transport,
+              rangeChunkSize: chunkSize,
+              disableAutoFetch: true,
+              disableStream: true,
+              disableRange: false,
+            });
+            await application.pdfViewer.firstPagePromise;
+            await initialView.promise;
+            // Match the generic viewer's FORCE_PAGES_LOADED_TIMEOUT: readable
+            // pages must not wait forever for metadata from every other page.
+            let pagesTimer;
+            try {
+              await Promise.race([
+                application.pdfViewer.pagesPromise,
+                new Promise(resolve => { pagesTimer = setTimeout(resolve, 10000); }),
+              ]).catch(() => {}); // The stock viewer reports individual page errors.
+            } finally {
+              clearTimeout(pagesTimer);
+            }
+            // PDF.js reapplies the initial view after discovering mixed page sizes.
+            // Let that finish before applying the workbench's requested page.
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            if (request !== generation) return;
+            setPage(pageNumber);
+          };
+          await Promise.race([load(), source.failure]);
+        } catch (error) {
+          source?.abort();
+          await application.pdfLoadingTask?.destroy().catch(() => {});
+          throw error;
         } finally {
           application.eventBus.off('documentinit', onInitialView);
           if (request === generation) {

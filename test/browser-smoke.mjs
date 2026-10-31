@@ -36,6 +36,8 @@ await page.addInitScript(() => {
     return open.apply(this, args);
   };
   const postMessage = Worker.prototype.postMessage;
+  window.__databaseReads = [];
+  window.__rejectNextReadRange = false;
   window.__holdRanges = false;
   window.__heldRangeCalls = [];
   window.__holdPdfTermination = false;
@@ -44,6 +46,16 @@ await page.addInitScript(() => {
   window.__heldPreviewPages = [];
   window.__pendingPreviewReplies = 0;
   Worker.prototype.postMessage = function (message, ...args) {
+    if (message?.action === 'source' || message?.action === 'read-range') {
+      window.__databaseReads.push({ action: message.action, ...message.payload });
+    }
+    if (window.__rejectNextReadRange && message?.action === 'read-range' && message.payload.begin > 0) {
+      window.__rejectNextReadRange = false;
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', {
+        data: { id: message.id, error: 'Reader storage deliberately unavailable' },
+      })));
+      return;
+    }
     if (window.__holdRanges && message?.action === 'ranges') {
       window.__heldRangeCalls.push(() => postMessage.call(this, message, ...args));
       return;
@@ -156,6 +168,45 @@ try {
   assert.deepEqual(await readFile(await pdfDownload.path()), Buffer.from(sample));
   await mutationComplete();
   step('PDF download preserves every original source byte');
+
+  // The full viewer must use the custom range API, including on download. The
+  // sample has an unreachable stream that ordinary reading should never fetch.
+  await page.evaluate(() => { window.__databaseReads = []; });
+  const rangeReader = await openReader(1);
+  const reads = await page.evaluate(() => window.__databaseReads);
+  assert.ok(reads.some(read => read.action === 'read-range' && read.begin > 0));
+  assert.ok(reads.every(read => read.action === 'read-range'), 'Reader must not request the complete source buffer');
+  const covered = new Set();
+  for (const {begin, end} of reads) {
+    for (let chunk = Math.floor(begin / 16384); chunk < Math.ceil(end / 16384); chunk++) covered.add(chunk);
+  }
+  assert.ok(covered.size * 16384 < sample.byteLength * 0.75, 'Reading must leave the unreachable stream in storage');
+  const rangeDownloadPromise = page.waitForEvent('download');
+  await rangeReader.evaluate(() => window.PDFViewerApplication.download());
+  const rangeDownload = await rangeDownloadPromise;
+  assert.equal(rangeDownload.suggestedFilename(), 'range-index-sample.pdf');
+  assert.deepEqual(await readFile(await rangeDownload.path()), Buffer.from(sample));
+  assert.ok((await page.evaluate(() => window.__databaseReads)).every(read => read.action === 'read-range'));
+  await page.locator('#show-workbench').click();
+  await page.locator('#exit-reader').click();
+  await page.locator('#pdf-reader').waitFor({state:'hidden'});
+  step('stock viewer reads sparse SQLite ranges and downloads the exact original through the same transport');
+
+  await page.evaluate(() => { window.__rejectNextReadRange = true; });
+  await page.getByRole('button', {name:'Open reader', exact:true}).click();
+  await notice('Reader storage deliberately unavailable');
+  await page.locator('#pdf-reader').waitFor({state:'hidden'});
+  assert.equal(await page.locator('#pdf-reader-frame').count(), 0);
+  const recoveredReader = await openReader(1);
+  await page.evaluate(() => { window.__rejectNextReadRange = true; });
+  await recoveredReader.evaluate(() => { void window.PDFViewerApplication.pdfDocument.getData().catch(() => {}); });
+  await notice('Reader storage deliberately unavailable');
+  await page.locator('#workbench-overlay').waitFor({state:'visible'});
+  await openReader(1);
+  await page.locator('#show-workbench').click();
+  await page.locator('#exit-reader').click();
+  await page.locator('#pdf-reader').waitFor({state:'hidden'});
+  step('reader range failures surface promptly and a fresh reader can reopen');
 
   await page.locator('#file-input').setInputFiles({name:'alternate.pdf', mimeType:'application/pdf', buffer:Buffer.from(makeIncrementalFixturePdf())});
   await notice('ready to inspect');

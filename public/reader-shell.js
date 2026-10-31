@@ -1,6 +1,6 @@
 // The stock PDF.js viewer owns reading. Moving the workbench into a dialog
 // leaves the iframe, document, text selection, search, and scroll position intact.
-export function createReader({ getBytes, onShowWorkbench, onFiles }) {
+export function createReader({ readRange, onShowWorkbench, onFiles }) {
   const $ = selector => document.querySelector(selector);
   const surface = $('#pdf-reader');
   const overlay = $('#workbench-overlay');
@@ -95,9 +95,15 @@ export function createReader({ getBytes, onShowWorkbench, onFiles }) {
         }, { once: true });
         next.src = '/pdfjs/web/viewer.html?file=';
       });
-      const [api, data] = await Promise.all([ready, getBytes(sourceDocument.document_id)]);
+      const api = await ready;
       if (request !== generation) return;
-      await api.open({ data, filename: sourceDocument.filename, pageNumber });
+      await api.open({
+        byteLength: sourceDocument.byte_length,
+        chunkSize: sourceDocument.chunk_size,
+        readRange: (begin, end) => readRange(sourceDocument.document_id, begin, end),
+        filename: sourceDocument.filename,
+        pageNumber,
+      });
       if (request !== generation) return;
       documentId = sourceDocument.document_id;
       readyFrame = next;
@@ -132,6 +138,14 @@ export function createReader({ getBytes, onShowWorkbench, onFiles }) {
     if (!active || event.detail.source !== frame()?.contentWindow) return;
     if (!overlay.open) overlay.showModal();
     void onFiles(event.detail.files);
+  });
+  window.document.addEventListener('pdf-workbench-reader-error', event => {
+    if (!active || event.detail.source !== frame()?.contentWindow) return;
+    // The failed loading task has been destroyed. Reopening this document must
+    // create a fresh iframe instead of reusing the now-unusable reader.
+    readyFrame = null;
+    if (!overlay.open) overlay.showModal();
+    window.document.dispatchEvent(new CustomEvent('reader-error', { detail: new Error(event.detail.message) }));
   });
   return { open, exit, get active() { return active; }, get documentId() { return documentId; } };
 }

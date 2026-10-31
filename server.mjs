@@ -6,7 +6,7 @@ import { makeFixturePdf } from './test/fixture.mjs';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_ROOT = path.join(ROOT, 'public');
-const PDF_ROOT = path.join(ROOT, 'node_modules/pdfjs-dist');
+const PDF_ROOT = path.join(ROOT, '.cache/pdfjs');
 const SQL_ROOT = path.join(ROOT, 'node_modules/sql.js/dist');
 const fail = (message, status) => Object.assign(new Error(message), { status });
 const contentTypes = {
@@ -42,18 +42,10 @@ export function createDebugServer({ host = '127.0.0.1' } = {}) {
       else {
         let root = PUBLIC_ROOT;
         let relative = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).slice(1);
-        // The official viewer keeps its release-matched core in public/pdfjs.
-        // Its unchanged relative URLs reuse the identical worker and resources
-        // from the pinned pdfjs-dist dependency instead of vendoring duplicates.
+        // Every browser PDF.js asset comes from the same verified release.
         if (url.pathname.startsWith('/pdfjs/')) {
-          const viewerAsset = decodeURIComponent(url.pathname.slice('/pdfjs/'.length));
-          if (/^build\/pdf\.(worker|sandbox)\.mjs$/.test(viewerAsset)) {
-            root = PDF_ROOT;
-            relative = viewerAsset;
-          } else if (/^web\/(cmaps|standard_fonts|wasm|iccs)\/[^/]+$/.test(viewerAsset)) {
-            root = PDF_ROOT;
-            relative = viewerAsset.slice('web/'.length);
-          }
+          root = PDF_ROOT;
+          relative = decodeURIComponent(url.pathname.slice('/pdfjs/'.length));
         }
         if (url.pathname.startsWith('/vendor/')) {
           relative = decodeURIComponent(url.pathname.slice('/vendor/'.length));
@@ -62,13 +54,14 @@ export function createDebugServer({ host = '127.0.0.1' } = {}) {
             root = PDF_ROOT;
             if (['pdf.mjs', 'pdf.worker.mjs'].includes(relative)) relative = `build/${relative}`;
             if (!/^(build\/(pdf|pdf\.worker)\.mjs|(cmaps|standard_fonts|wasm|iccs)\/[^/]+)$/.test(relative)) throw fail('Asset not found', 404);
+            if (!relative.startsWith('build/')) relative = `web/${relative}`;
           }
         }
         filename = path.resolve(root, relative);
         if (!filename.startsWith(`${root}${path.sep}`)) throw fail('Asset not found', 404);
       }
       const info = await stat(filename).catch(() => null);
-      if (!info?.isFile()) throw fail('Asset not found. Run npm ci to install frontend dependencies.', 404);
+      if (!info?.isFile()) throw fail('Asset not found. Run npm ci (or npm run setup:viewer to restore PDF.js assets).', 404);
       response.writeHead(200, {
         'Content-Type': contentTypes[path.extname(filename)] || 'application/octet-stream',
         'Content-Length': info.size,

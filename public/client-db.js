@@ -320,6 +320,11 @@ export async function getDocumentBytes(id) {
   return bytes;
 }
 
+export async function readDocumentRange(id, begin, end) {
+  const { bytes } = await rpc('read-range', { id, begin, end });
+  return bytes;
+}
+
 // The interface intentionally mirrors the UI's former routes without performing
 // any HTTP requests: PDF contents cross only the local browser Worker boundary.
 export async function clientRequest(path, options = {}) {

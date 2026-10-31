@@ -4,7 +4,7 @@ A browser-only debugging frontend for the PDF range database. **SQLite runs as W
 
 ## Run
 
-With Node.js 24 or later:
+With Node.js 24.5 or later:
 
 ```sh
 npm ci
@@ -13,7 +13,9 @@ npm run dev
 
 Open **http://127.0.0.1:3000** in a current Chromium, Firefox, or Safari browser. Node serves the static HTML, JavaScript, WASM, PDF.js assets, and sample PDF only. It does not open SQLite or receive your PDF files or queries. No Node SQLite serialization APIs are required by the frontend.
 
-Set `PORT` for another port. The default host is loopback; browser workers and Web Crypto work on localhost. If serving this frontend remotely, use HTTPS. No build step or third-party CDN is needed.
+`npm ci` also downloads the pinned official PDF.js viewer, verifies its SHA-256, and installs it in ignored `.cache/pdfjs/`. No PDF.js distribution files are committed. Run `npm run setup:viewer` to restore those assets separately; see [setup and offline options](docs/pdfjs.md).
+
+Set `PORT` for another port. The default host is loopback; browser workers and Web Crypto work on localhost. If serving this frontend remotely, use HTTPS. No bundler or runtime third-party CDN is needed.
 
 ## Debug a PDF
 
@@ -32,7 +34,7 @@ Set `PORT` for another port. The default host is loopback; browser workers and W
 - Each cold trace has a 60-second timeout and a 20-million-pixel canvas limit. Multi-page traces run sequentially.
 - SQL runs in a separate disposable browser worker on a snapshot of the current database. Only a single read query is accepted, and SQLite's `query_only` setting blocks writes. The worker is terminated after two seconds; the live database and UI remain available.
 - Results are capped at 500 rows and approximately 2 MiB. Long cells are truncated and BLOBs are summarized. Queries cannot change the live database. CSV export contains the displayed results.
-- The reader uses the official PDF.js 6.4.299 viewer, served locally with its matching renderer. Its preferences, view history, and saved signatures remain in iframe memory and disappear when you exit the reader. Source and license details are in [`public/pdfjs/NOTICE.md`](public/pdfjs/NOTICE.md).
+- The reader uses the official PDF.js 6.4.299 viewer and matching assets from one verified release. It reads SQLite byte ranges through a custom `PDFDataRangeTransport`, without first assembling the full PDF. Search, printing, and download may require more or all bytes. Its preferences, view history, and saved signatures remain in iframe memory and disappear when you exit the reader. See [distribution, license, and storage details](docs/pdfjs.md).
 - PDF.js supports selecting/searching existing text and its standard annotation tools. Use its download control to save reader edits; tracing and replay always use the original bytes imported into SQLite. The workbench does not perform OCR.
 
 ## Validation
@@ -41,9 +43,9 @@ Set `PORT` for another port. The default host is loopback; browser workers and W
 npm test
 ```
 
-This checks the existing PDF indexing library (including Windows asset path handling) and verifies that the development server serves frontend assets while rejecting all database API operations.
+This checks the PDF indexing library (including Windows asset path handling), reader transport failures and cancellation, archive checksum rejection, and asset serving while rejecting all database API operations.
 
-The optional browser smoke test exercises the real SQLite WASM UI, tracing, replay, SQL, full-page PDF.js reading and its workbench overlay, isolation between tabs, and clearing on reload. With Playwright and Chromium available:
+The optional browser smoke test exercises the real SQLite WASM UI, tracing, replay, SQL, sparse range reads in the stock viewer, reader download and storage failure recovery, its workbench overlay, isolation between tabs, and clearing on reload. With Playwright and Chromium available:
 
 ```sh
 node test/browser-smoke.mjs

@@ -21,13 +21,20 @@ await test('development server only serves assets and rejects database operation
     const viewer = await fetch(origin + '/pdfjs/web/viewer.html?file=');
     assert.equal(viewer.status, 200);
     assert.match(await viewer.text(), /<script src="\/reader\.js"><\/script>/);
-    for (const route of ['/reader.js', '/pdfjs/web/viewer.mjs', '/pdfjs/web/viewer.css', '/pdfjs/build/pdf.mjs', '/pdfjs/build/pdf.worker.mjs', '/pdfjs/build/pdf.sandbox.mjs', '/pdfjs/web/locale/locale.json', '/pdfjs/web/locale/en-US/viewer.ftl', '/pdfjs/web/images/toolbarButton-zoomIn.svg', '/pdfjs/web/standard_fonts/LiberationSans-Regular.ttf', '/pdfjs/web/wasm/openjpeg.wasm', '/pdfjs/web/cmaps/Adobe-Japan1-UCS2.bcmap']) {
+    for (const route of ['/reader.js', '/reader-transport.js', '/pdfjs/LICENSE', '/pdfjs/web/viewer.mjs', '/pdfjs/web/viewer.css', '/pdfjs/build/pdf.mjs', '/pdfjs/build/pdf.worker.mjs', '/pdfjs/build/pdf.sandbox.mjs', '/pdfjs/web/locale/locale.json', '/pdfjs/web/locale/en-US/viewer.ftl', '/pdfjs/web/images/toolbarButton-zoomIn.svg', '/pdfjs/web/standard_fonts/LiberationSans-Regular.ttf', '/pdfjs/web/wasm/openjpeg.wasm', '/pdfjs/web/cmaps/Adobe-Japan1-UCS2.bcmap']) {
       const response = await fetch(origin + route);
       assert.equal(response.status, 200, route);
       if (route.endsWith('.mjs')) assert.match(response.headers.get('content-type'), /javascript/);
       if (route.endsWith('.json')) assert.match(response.headers.get('content-type'), /application\/json/);
       if (route.endsWith('.ftl')) assert.match(response.headers.get('content-type'), /text\/plain/);
       await response.body.cancel();
+    }
+    for (const name of ['pdf.mjs', 'pdf.worker.mjs']) {
+      const [viewerAsset, workbenchAsset] = await Promise.all([
+        fetch(`${origin}/pdfjs/build/${name}`).then(response => response.text()),
+        fetch(`${origin}/vendor/${name}`).then(response => response.text()),
+      ]);
+      assert.equal(workbenchAsset, viewerAsset, 'Viewer and workbench must use the same release build');
     }
     for (const route of ['/api/state', '/api/documents', '/api/query']) {
       assert.equal((await fetch(origin + route)).status, 404);

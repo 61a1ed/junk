@@ -3,15 +3,18 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.5.0"
   },
   "scripts": {
+    "postinstall": "npm run setup:viewer",
+    "setup:viewer": "node --use-env-proxy scripts/setup-viewer.mjs",
     "dev": "node server.mjs",
     "start": "node server.mjs",
-    "test": "node --test test/index.test.mjs test/server.test.mjs"
+    "test": "node --test test/index.test.mjs test/server.test.mjs test/setup-viewer.test.mjs test/reader-transport.test.mjs"
   },
   "dependencies": {
     "@napi-rs/canvas": "1.1.0",
+    "fflate": "0.8.2",
     "pdfjs-dist": "6.4.299",
     "sql.js": "1.15.2"
   }
