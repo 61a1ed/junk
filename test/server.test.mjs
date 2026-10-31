@@ -9,7 +9,7 @@ await test('development server only serves assets and rejects database operation
   await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;
   try {
-    for (const route of ['/', '/app.js', '/client-db.js', '/database-worker.js', '/query-worker.js', '/schema.sql', '/vendor/sql-wasm.js', '/vendor/sql-wasm.wasm', '/vendor/pdf.mjs', '/vendor/pdf.worker.mjs']) {
+    for (const route of ['/', '/app.js', '/client-db.js', '/database-worker.js', '/query-worker.js', '/schema.sql', '/vendor/sql-wasm.js', '/vendor/sql-wasm.wasm', '/vendor/pdf.mjs', '/vendor/pdf.worker.mjs', '/vendor/pdf_viewer.mjs', '/vendor/pdf_viewer.css', '/pdf-address.js', '/pdf-page-cells.js', '/pdf-page-cells.css', '/sql-results.js']) {
       const response = await fetch(origin + route);
       assert.equal(response.status, 200, route);
       if (route.endsWith('.wasm')) assert.equal(response.headers.get('content-type'), 'application/wasm');

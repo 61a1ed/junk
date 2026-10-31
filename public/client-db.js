@@ -325,6 +325,10 @@ export async function readDocumentRange(id, begin, end) {
   return bytes;
 }
 
+export function getTracedPageSource({ documentId, profileId, pageNumber }) {
+  return rpc('page-source', { id: documentId, profileId, pageNumber });
+}
+
 // The interface intentionally mirrors the UI's former routes without performing
 // any HTTP requests: PDF contents cross only the local browser Worker boundary.
 export async function clientRequest(path, options = {}) {

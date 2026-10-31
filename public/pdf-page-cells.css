@@ -1,0 +1,38 @@
+.pdf-page-cell {
+  width: 320px;
+  font: 11px/1.4 system-ui, sans-serif;
+  color: #35473a;
+  white-space: normal;
+}
+.pdf-cell-label {
+  padding: 0 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pdf-page-cell .pdf-cell-stage {
+  width: 320px;
+  height: 420px;
+  padding: 8px;
+  overflow: auto;
+  background: #eef1ec;
+  border: 1px solid #dce3de;
+  border-radius: 4px;
+  color-scheme: light;
+}
+.pdf-page-cell .pdfViewer .page {
+  margin: 0 auto;
+  border: 0;
+  box-sizing: content-box;
+  overflow-wrap: normal;
+  text-align: initial;
+}
+.pdf-cell-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 42px;
+}
+.pdf-cell-status { flex: 1; color: #64745b; font-size: 10px; }
+.pdf-cell-error { margin-top: 6px; color: #a55440; font: 11px/1.5 system-ui, sans-serif; }

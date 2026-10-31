@@ -225,6 +225,16 @@ async function handle(action, payload = {}) {
       return { bytes: readRange({ id: payload.id, begin: 0, end: document.byte_length }).bytes };
     }
     case 'read-range': return readRange(payload);
+    case 'page-source': {
+      validateProfileId(payload.profileId);
+      const document = documentRow(payload.id);
+      validatePage(payload.pageNumber, document.page_count);
+      const manifest = one(`SELECT width, height, rotation FROM page_manifests
+        WHERE document_id = ? AND profile_id = ? AND page_number = ?`,
+      [payload.id, payload.profileId, payload.pageNumber]);
+      if (!manifest) throw new Error('No completed trace for this page and profile.');
+      return { document, manifest };
+    }
     case 'save-manifest': return saveManifest(payload);
     case 'manifest': {
       validateProfileId(payload.profileId);

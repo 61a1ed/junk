@@ -26,6 +26,47 @@ Set `PORT` for another port. The default host is loopback; browser workers and W
 5. Open **Page manifests** to inspect traces and combine the deduplicated ranges for selected pages. Enter `1, 3` or `1-3`; ranges are half-open `[start, end)`.
 6. Use **SQL console** for read-only SQL, query presets, and CSV export. Expand **Database schema** in the console for live tables, columns, constraints, and row counts while writing queries. **Activity log** records operations in this tab.
 
+## PDF pages in SQL results
+
+Choose **Page grid (traced pages)** in the SQL presets to display selectable PDF
+pages inside the results table. Any column whose name starts with `pdf`
+(case-insensitive) is treated as a page-address column. Other columns stay text,
+even if they contain an address. Use multiple PDF columns for side-by-side pages,
+or SQL ordering/filtering to choose an arbitrary collection across documents.
+
+The address format is `pdf:v1:<document-id>:<profile-id>:<page-number>`. Both IDs
+are lowercase 64-character SHA-256 hashes; the page number is a positive,
+1-based decimal integer. For example:
+
+```sql
+SELECT u.filename, m.page_number,
+       'pdf:v1:' || m.document_id || ':' || m.profile_id
+       || ':' || m.page_number AS pdf_page
+FROM page_manifests m
+JOIN upload_metadata u USING (document_id)
+ORDER BY u.filename, m.page_number;
+```
+
+The exact document/profile/page must already have a completed trace. Invalid
+addresses remain visible with an explanation; missing documents or traces show
+a per-cell error. NULL stays NULL. Rendering never creates a trace. CSV export
+always contains the original SQL values, including encoded addresses.
+
+Each cell fits a `PDFPageView` into a fixed 320 × 420 CSS-pixel stage with a
+selectable text layer. **Open reader** opens the whole original document at
+that page. Annotations and editing remain in the official reader. Cells render
+only when visible, with at most two page renders in progress, and share one
+PDF.js document per source PDF while its cells are active. Leaving the viewport,
+replacing results, deleting a document, or resetting releases cell resources.
+
+The table has a generic cell-decoration hook in `sql-results.js`; page-address
+parsing lives in `pdf-address.js`, and the renderer in `pdf-page-cells.js` accepts
+storage and navigation callbacks. The table itself has no PDF.js or database
+dependency. Rendering reads source ranges through the existing storage adapter;
+the trace is an eligibility check, not a restriction on text-layer reads. Strict
+manifest-only verification remains a separate operation. This adds no remote
+storage or prefetch policy.
+
 ## Memory and query behavior
 
 - Every tab owns a separate in-memory SQLite WASM database. **Reload, close the tab, or choose Reset session to discard its PDFs and database.** Nothing is stored in IndexedDB, localStorage, OPFS, or a server database file.
@@ -49,7 +90,12 @@ The optional browser smoke test exercises the real SQLite WASM UI, tracing, repl
 
 ```sh
 node test/browser-smoke.mjs
+node test/browser-page-grid.mjs
 ```
+
+The page-grid test covers selectable cells, shared documents, reader navigation,
+raw CSV values, malformed and untraced addresses, mixed sources, lazy rendering,
+and cancellation when results are replaced or the session is reset.
 
 Alternatively set `PLAYWRIGHT_MODULE` to an installed Playwright module and `CHROMIUM_PATH` to a Chromium executable. Neither is a runtime dependency.
 

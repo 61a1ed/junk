@@ -11,10 +11,15 @@ in ignored `.cache/pdfjs/`, including its upstream LICENSE and file notices.
 It adds one script tag to `web/viewer.html`, before the viewer modules, to load
 our `/reader.js` adapter. All other upstream files remain unchanged.
 
-The server serves the complete viewer and all browser rendering assets (including
-the inline preview and tracer) from that release. The `pdfjs-dist` npm dependency
-is used separately by the Node CLI and its tests. No browser assets are fetched
-from a third-party CDN at runtime.
+The server serves the complete viewer and browser rendering core (including the
+inline preview and tracer) from that release. Standalone SQL page cells use
+`pdf_viewer.mjs` and `pdf_viewer.css` from the matching, lockfile-pinned
+`pdfjs-dist` npm package; the generic release does not provide this component
+entry point. The cell renderer scopes the component CSS to its own cells so
+upstream sidebar and dialog selectors do not style the workbench. Cells use the
+same release core and worker as the rest of the app.
+The npm package also supplies the Node CLI renderer. No browser assets are
+fetched from a third-party CDN at runtime.
 
 Run `npm run setup:viewer` to restore the generated assets. For offline setup,
 set `PDFJS_ARCHIVE` to a previously downloaded release ZIP; the same checksum

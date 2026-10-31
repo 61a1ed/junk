@@ -1,5 +1,7 @@
-import { clientRequest, getDocumentBytes, readDocumentRange } from './client-db.js';
+import { clientRequest, getDocumentBytes, readDocumentRange, getTracedPageSource } from './client-db.js';
 import { createReader } from './reader-shell.js';
+import { renderSqlResults } from './sql-results.js';
+import { createPdfPageCells } from './pdf-page-cells.js';
 
 const $ = selector => document.querySelector(selector);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -14,6 +16,7 @@ let state = { documents: [], stats: {}, profile: {} }, selectedId = null, detail
 let pending = false, queryPending = false, queryGeneration = 0, logs = [], queryResult = null, verified = new Map();
 let pdfjs, previewTask, previewDoc, previewId, renderTask, previewGeneration = 0, detailGeneration = 0;
 let previewZoom = 'fit', previewSize = '', previewResizeTimer;
+let disposeQueryResults = () => {};
 const reader = createReader({
   readRange: readDocumentRange,
   onShowWorkbench: async (id, currentPage) => {
@@ -31,6 +34,7 @@ async function openReader() {
   catch (error) { notify(error.message, 'error'); log(error.message, true); }
 }
 const presets = {
+  pages: "SELECT u.filename, m.page_number,\n       'pdf:v1:' || m.document_id || ':' || m.profile_id\n       || ':' || m.page_number AS pdf_page\nFROM page_manifests m\nJOIN upload_metadata u USING (document_id)\nORDER BY u.filename, m.page_number;",
   documents: 'SELECT d.document_id, u.filename, d.byte_length,\n       d.chunk_size, u.page_count, d.created_at\nFROM documents d\nJOIN upload_metadata u USING (document_id)\nORDER BY d.created_at DESC;',
   manifests: 'SELECT page_number, page_count, width, height,\n       observed_bytes, pixel_sha256\nFROM page_manifests\nORDER BY document_id, page_number;',
   dependencies: 'SELECT document_id, page_number, chunk_number\nFROM page_dependencies\nORDER BY document_id, page_number, chunk_number;',
@@ -308,6 +312,7 @@ async function deleteDocument() {
   const { document_id:id, filename } = detail.document;
   if (!await confirmAction('Delete this PDF?', `${filename} and all of its stored chunks and page manifests will be removed from this session.`, 'Delete PDF')) return;
   await operation('Deleting PDF…',async()=>{
+    clearQueryResults('Source document deleted. Run a query to refresh the results.');
     await api(`/documents/${id}`,{method:'DELETE'});
     await clearSelection(); await refreshState();
     if(state.documents.length) await selectDocument(state.documents[0].document_id);
@@ -317,9 +322,8 @@ async function deleteDocument() {
 async function resetSession() {
   if (!await confirmAction('Reset this browser session?', 'This removes every uploaded PDF, stored chunk, and page manifest from this tab’s memory. Other tabs have their own databases.', 'Reset session')) return;
   await operation('Resetting database…',async()=>{
-    await post('/reset'); verified.clear(); queryResult=null; ++queryGeneration;
-    $('#query-results').innerHTML='<div class="simple-empty">Session reset. Run a query to inspect the empty database.</div>';
-    $('#result-count').textContent='—'; $('#query-time').textContent=''; $('#export-csv').disabled=true;
+    clearQueryResults('Session reset. Run a query to inspect the empty database.');
+    await post('/reset'); verified.clear();
     await clearSelection(); await refreshState();
     log('Database session reset. All source PDFs and manifests cleared.'); notify('Session reset. Your database is empty.');
   });
@@ -356,8 +360,22 @@ async function loadSchema() {
     if (generation === schemaGeneration) $('#schema-tables').innerHTML = `<div class="query-error">Unable to load schema: ${escapeHtml(error.message)}</div>`;
   }
 }
+function clearQueryResults(message) {
+  disposeQueryResults();
+  disposeQueryResults = () => {};
+  queryResult = null;
+  ++queryGeneration;
+  const empty = document.createElement('div');
+  empty.className = 'simple-empty';
+  empty.textContent = message;
+  $('#query-results').replaceChildren(empty);
+  $('#result-count').textContent = '—';
+  $('#query-time').textContent = '';
+  $('#export-csv').disabled = true;
+}
 async function runQuery() {
   if (queryPending) return;
+  clearQueryResults('Running query…');
   const generation = ++queryGeneration;
   queryPending=true; $('#run-query').disabled=true; $('#run-query').textContent='Running…';
   $('#export-csv').disabled=true; queryResult=null;
@@ -367,7 +385,15 @@ async function runQuery() {
     queryResult=result;
     $('#result-count').textContent=`${result.rows.length}${result.truncated?'+':''}`;
     $('#query-time').textContent=`${result.elapsedMs.toFixed(1)} ms${result.truncated?' · results truncated':''}`;
-    $('#query-results').innerHTML=result.columns.length?`<table class="data-table"><thead><tr>${result.columns.map(c=>`<th>${escapeHtml(c)}</th>`).join('')}</tr></thead><tbody>${result.rows.map(row=>`<tr>${row.map(v=>`<td class="monospace"><span class="cell-truncate" title="${escapeHtml(v)}">${v===null?'<span class="small-muted">NULL</span>':escapeHtml(v)}</span></td>`).join('')}</tr>`).join('')}</tbody></table>${!result.rows.length?'<div class="simple-empty">Query completed. No rows matched.</div>':''}`:'<div class="simple-empty">Query returned no columns.</div>';
+    const pages = createPdfPageCells({
+      resolvePage: getTracedPageSource,
+      readRange: readDocumentRange,
+      onOpen: (sourceDocument, pageNumber) => reader.open(sourceDocument, pageNumber),
+    });
+    const disposeTable = renderSqlResults($('#query-results'), result, ({ container, column, value }) => {
+      if (/^pdf/i.test(column) && value !== null) return pages.mount(container, value);
+    });
+    disposeQueryResults = () => { disposeTable(); pages.dispose(); };
     $('#export-csv').disabled=!result.columns.length;
     log(`SQL query completed: ${result.rows.length}${result.truncated?'+':''} rows in ${result.elapsedMs.toFixed(1)} ms.`);
   } catch(error) {

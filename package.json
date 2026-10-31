@@ -10,7 +10,7 @@
     "setup:viewer": "node --use-env-proxy scripts/setup-viewer.mjs",
     "dev": "node server.mjs",
     "start": "node server.mjs",
-    "test": "node --test test/index.test.mjs test/server.test.mjs test/setup-viewer.test.mjs test/reader-transport.test.mjs"
+    "test": "node --test test/index.test.mjs test/server.test.mjs test/setup-viewer.test.mjs test/reader-transport.test.mjs test/pdf-address.test.mjs"
   },
   "dependencies": {
     "@napi-rs/canvas": "1.1.0",

@@ -8,6 +8,7 @@ const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC_ROOT = path.join(ROOT, 'public');
 const PDF_ROOT = path.join(ROOT, '.cache/pdfjs');
 const SQL_ROOT = path.join(ROOT, 'node_modules/sql.js/dist');
+const COMPONENT_ROOT = path.join(ROOT, 'node_modules/pdfjs-dist/web');
 const fail = (message, status) => Object.assign(new Error(message), { status });
 const contentTypes = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -50,6 +51,7 @@ export function createDebugServer({ host = '127.0.0.1' } = {}) {
         if (url.pathname.startsWith('/vendor/')) {
           relative = decodeURIComponent(url.pathname.slice('/vendor/'.length));
           if (['sql-wasm.js', 'sql-wasm.wasm'].includes(relative)) root = SQL_ROOT;
+          else if (['pdf_viewer.mjs', 'pdf_viewer.css'].includes(relative)) root = COMPONENT_ROOT;
           else {
             root = PDF_ROOT;
             if (['pdf.mjs', 'pdf.worker.mjs'].includes(relative)) relative = `build/${relative}`;
