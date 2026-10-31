@@ -37,8 +37,7 @@ or SQL ordering/filtering to choose an arbitrary collection across documents.
 The address format is `pdf:v1:<document-id>:<profile-id>:<page-number>`. Both IDs
 are lowercase 64-character SHA-256 hashes; the page number is a positive,
 1-based decimal integer. `page_manifests.ref` is a virtual generated column
-containing this address, including for existing Node databases opened by the
-CLI. Alias it to a name starting with `pdf` to render it:
+containing this address. Alias it to a name starting with `pdf` to render it:
 
 ```sql
 SELECT u.filename, m.page_number, m.ref AS pdf_page
@@ -75,6 +74,39 @@ the trace is an eligibility check, not a restriction on text-layer reads. Strict
 manifest-only verification remains a separate operation. This adds no remote
 storage or prefetch policy.
 
+## Named page regions
+
+Enlarge a traced page in the SQL results, choose **Select region**, and drag a
+rectangle on the page. Enter a name and choose **Save region**. Exit selection
+to select text normally. Saved regions appear as outlines and named buttons;
+choose one to preview its crop, or **Delete** to remove it. **Show source page**
+returns from a crop to the full page and its region controls.
+
+The **Saved regions** SQL preset renders cropped previews. Like full-page
+references, a region reference must be in a column whose name begins with `pdf`:
+
+```sql
+SELECT name, bounds, ref AS pdf_region
+FROM page_regions
+ORDER BY id;
+```
+
+`page_regions.bounds` is a JSON array `[xmin, ymin, xmax, ymax]` in native PDF
+page coordinates, including nonzero/negative origins. The same array is used
+by the selection UI, database messages, and renderer. Display rotation, zoom,
+and screen pixel density do not change the saved coordinates. Region references
+have the generated form `pdf:region:v1:<id>` and refer to this database session.
+Crops render to a canvas sized only for the selected area, with a translated
+PDF.js viewport and a matching clipped, selectable text layer. PDF.js still
+processes the page's drawing instructions and reads source PDF ranges.
+
+`page_manifests.id` is an autoincrement primary key; document/profile/page remains
+unique. Dependencies use `(page_manifest_id, chunk_number)`, and regions refer
+to the same manifest ID. Retracing replaces the manifest and deletes its regions.
+Deleting the source document or resetting the session also deletes its regions.
+Reloading clears all browser data. This proof of concept uses fresh databases;
+there are no schema migrations for existing Node database files.
+
 ## Memory and query behavior
 
 - Every tab owns a separate in-memory SQLite WASM database. **Reload, close the tab, or choose Reset session to discard its PDFs and database.** Nothing is stored in IndexedDB, localStorage, OPFS, or a server database file.
@@ -98,6 +130,8 @@ The optional browser smoke test exercises the real SQLite WASM UI, tracing, repl
 
 ```sh
 node test/browser-smoke.mjs
+node test/browser-page-grid.mjs
+node test/browser-regions.mjs
 node test/browser-page-grid.mjs
 ```
 

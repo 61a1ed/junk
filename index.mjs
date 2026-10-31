@@ -35,12 +35,6 @@ export const PROFILE_ID = sha256(JSON.stringify(PROFILE));
 export function openDatabase(filename) {
   const db = new DatabaseSync(filename);
   db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
-  // CREATE TABLE IF NOT EXISTS also opens databases made before page refs.
-  if (!db.prepare('PRAGMA table_xinfo(page_manifests)').all().some(column => column.name === 'ref')) {
-    db.exec(`ALTER TABLE page_manifests ADD COLUMN ref TEXT GENERATED ALWAYS AS (
-      'pdf:v1:' || document_id || ':' || profile_id || ':' || page_number
-    ) VIRTUAL`);
-  }
   db.exec('PRAGMA busy_timeout = 5000');
   return db;
 }
@@ -249,8 +243,9 @@ export async function indexPage(db, documentId, pageNumber, options = {}) {
        pixel_sha256, observed_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(documentId, PROFILE_ID, pageNumber, rendered.pageCount,
         rendered.width, rendered.height, rendered.rotation, rendered.pixelSha256, observedBytes);
-    const insert = db.prepare('INSERT INTO page_dependencies VALUES (?, ?, ?, ?)');
-    for (const n of chunks) insert.run(documentId, PROFILE_ID, pageNumber, n);
+    const manifestId = db.prepare('SELECT last_insert_rowid() AS id').get().id;
+    const insert = db.prepare('INSERT INTO page_dependencies VALUES (?, ?)');
+    for (const n of chunks) insert.run(manifestId, n);
   });
   return { documentId, profileId: PROFILE_ID, pageNumber, chunks, observedBytes,
     sourceBytes: document.byte_length, ...rendered };
@@ -260,16 +255,16 @@ export async function indexPage(db, documentId, pageNumber, options = {}) {
 // byte ranges. A missing manifest is an error, never an empty dependency set.
 export function pageRanges(db, documentId, pageNumbers, profileId = PROFILE_ID) {
   const document = getDocumentRow(db, documentId);
-  const manifest = db.prepare(`SELECT 1 FROM page_manifests
+  const manifest = db.prepare(`SELECT id FROM page_manifests
     WHERE document_id = ? AND profile_id = ? AND page_number = ?`);
-  const deps = db.prepare(`SELECT chunk_number FROM page_dependencies
-    WHERE document_id = ? AND profile_id = ? AND page_number = ?`);
+  const deps = db.prepare(`SELECT chunk_number FROM page_dependencies WHERE page_manifest_id = ?`);
   const chunks = new Set();
   for (const pageNumber of new Set(pageNumbers)) {
-    if (!manifest.get(documentId, profileId, pageNumber)) {
+    const row = manifest.get(documentId, profileId, pageNumber);
+    if (!row) {
       throw new Error(`No manifest for page ${pageNumber} and profile ${profileId}`);
     }
-    for (const row of deps.all(documentId, profileId, pageNumber)) chunks.add(row.chunk_number);
+    for (const dependency of deps.all(row.id)) chunks.add(dependency.chunk_number);
   }
   const ranges = [];
   for (const n of [...chunks].sort((a, b) => a - b)) {
@@ -289,8 +284,8 @@ export async function verifyPage(db, documentId, pageNumber, options = {}) {
     .get(documentId, PROFILE_ID, pageNumber);
   if (!manifest) throw new Error('No manifest for the current rendering profile');
   const allowed = new Set(db.prepare(`SELECT chunk_number FROM page_dependencies
-    WHERE document_id = ? AND profile_id = ? AND page_number = ?`)
-    .all(documentId, PROFILE_ID, pageNumber).map(row => row.chunk_number));
+    WHERE page_manifest_id = ?`)
+    .all(manifest.id).map(row => row.chunk_number));
   const { document, readRange } = makeReader(db, documentId, new Set(), allowed);
   const rendered = await renderColdPage({
     ...options, byteLength: document.byte_length, chunkSize: document.chunk_size,

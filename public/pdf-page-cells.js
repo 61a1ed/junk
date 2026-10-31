@@ -1,5 +1,7 @@
 import { decodePdfAddress } from './pdf-address.js';
 import { createRangeSource } from './reader-transport.js';
+import { cropGeometry, createRegionView } from './pdf-region.js';
+import { createRegionEditor } from './pdf-region-editor.js';
 
 export const PDF_PAGE_WIDTHS = Object.freeze([240, 320, 480, 640, 800]);
 
@@ -25,7 +27,7 @@ async function loadComponents() {
 
 // Storage and navigation are injected; this module knows nothing about SQL,
 // result columns, the inspector, or the database implementation.
-export function createPdfPageCells({ resolvePage, readRange, onOpen, width = 320 }) {
+export function createPdfPageCells({ resolvePage, readRange, onOpen, onSaveRegion, onDeleteRegion, width = 320 }) {
   if (!PDF_PAGE_WIDTHS.includes(width)) throw new Error('Unsupported page width');
   const documents = new Map();
   const cells = new Map();
@@ -81,12 +83,15 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen, width = 320
 
   function release(cell, keepDocument = false) {
     ++cell.generation;
+    cell.disposeEditor?.();
+    cell.disposeEditor = null;
+    cell.regionTools?.replaceChildren();
     cell.cancelText?.();
     cell.cancelText = null;
     // reset frees this view's layers/canvas without cleaning a PDFPageProxy
     // that another cell may still be using. The document owns shared cleanup.
     cell.view?.reset();
-    void cell.view?.l10n.destroy().catch(() => {});
+    void cell.view?.l10n?.destroy().catch(() => {});
     cell.view = null;
     if (!keepDocument) {
       cell.lease?.release();
@@ -103,7 +108,7 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen, width = 320
     cell.status.textContent = 'Loading page…';
     cell.card.setAttribute('aria-busy', 'true');
     try {
-      const [{ document: sourceDocument, manifest }, { pdfjs, PDFPageView, EventBus }] = await Promise.all([
+      const [{ document: sourceDocument, manifest, region, regions }, { pdfjs, PDFPageView, EventBus }] = await Promise.all([
         resolvePage(cell.address), loadComponents(),
       ]);
       if (!current()) return;
@@ -111,39 +116,46 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen, width = 320
       cell.lease ||= acquire(sourceDocument);
       const pdf = await cell.lease.promise;
       if (!current()) return;
-      const pdfPage = await pdf.getPage(cell.address.pageNumber);
+      cell.pageNumber = manifest.page_number;
+      const pdfPage = await pdf.getPage(cell.pageNumber);
       if (!current()) return;
-      const viewport = pdfPage.getViewport({ scale: 1 });
+      const viewport = region ? cropGeometry(pdfPage, region.bounds) : pdfPage.getViewport({ scale: 1 });
       cell.stage.style.setProperty('--pdf-page-ratio', viewport.width / viewport.height);
       // Grid pages fit the chosen width and grow naturally in height. Only the
       // near-fullscreen preview fits both dimensions of its available space.
       const cssScale = cell.expanded
         ? Math.min((cell.stage.clientWidth - 20) / viewport.width, (cell.stage.clientHeight - 20) / viewport.height)
         : (width - 20) / viewport.width;
-      const eventBus = new EventBus();
-      const view = cell.view = new PDFPageView({
-        container: cell.stage, id: cell.address.pageNumber, eventBus,
-        scale: cssScale * 72 / 96,
-        defaultViewport: pdfPage.getViewport({ scale: cssScale }),
-        textLayerMode: 1, annotationMode: pdfjs.AnnotationMode.DISABLE,
-        enableAutoLinking: false, enableDetailCanvas: false,
-        maxCanvasPixels: 2_000_000, maxCanvasDim: 4096,
-      });
-      view.setPdfPage(pdfPage);
-      // draw() can finish before text extraction. Keep the queue slot until
-      // selection is ready, and detach the listener on cancellation as well.
-      const textReady = new Promise((resolve, reject) => {
-        const done = event => {
-          if (event.source !== view) return;
-          eventBus.off('textlayerrendered', done);
-          cell.cancelText = null;
-          event.error ? reject(event.error) : resolve();
-        };
-        eventBus.on('textlayerrendered', done);
-        cell.cancelText = () => { eventBus.off('textlayerrendered', done); resolve(); };
-      });
-      await Promise.all([view.draw(), textReady]);
+      if (region) {
+        cell.view = createRegionView({ pdfjs, pdfPage, bounds: region.bounds, scale: cssScale, container: cell.stage });
+        await cell.view.draw();
+      } else {
+        const eventBus = new EventBus();
+        const view = cell.view = new PDFPageView({
+          container: cell.stage, id: cell.pageNumber, eventBus,
+          scale: cssScale * 72 / 96,
+          defaultViewport: pdfPage.getViewport({ scale: cssScale }),
+          textLayerMode: 1, annotationMode: pdfjs.AnnotationMode.DISABLE,
+          enableAutoLinking: false, enableDetailCanvas: false,
+          maxCanvasPixels: 2_000_000, maxCanvasDim: 4096,
+        });
+        view.setPdfPage(pdfPage);
+        // draw() can finish before text extraction. Keep the queue slot until
+        // selection is ready, and detach the listener on cancellation as well.
+        const textReady = new Promise((resolve, reject) => {
+          const done = event => {
+            if (event.source !== view) return;
+            eventBus.off('textlayerrendered', done);
+            cell.cancelText = null;
+            event.error ? reject(event.error) : resolve();
+          };
+          eventBus.on('textlayerrendered', done);
+          cell.cancelText = () => { eventBus.off('textlayerrendered', done); resolve(); };
+        });
+        await Promise.all([view.draw(), textReady]);
+      }
       if (!current()) return;
+      if (cell.expanded) mountRegionTools(cell, manifest, region, regions);
       cell.status.textContent = '';
       cell.card.setAttribute('aria-busy', 'false');
       cell.open.disabled = false;
@@ -206,14 +218,45 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen, width = 320
     open.className = 'button small secondary';
     open.textContent = expanded ? 'Open full reader' : 'Enlarge';
     open.disabled = true;
-    open.setAttribute('aria-label', expanded ? 'Open full reader' : `Enlarge page ${address.pageNumber}`);
+    open.setAttribute('aria-label', expanded ? 'Open full reader' : (address.regionId ? `Enlarge region ${address.regionId}` : `Enlarge page ${address.pageNumber}`));
     const footer = document.createElement('div');
     footer.className = 'pdf-cell-footer';
     footer.append(status, open);
     card.append(stage, footer);
     const cell = { address, card, stage, status, open, generation: 0, visible: expanded, expanded };
+    if (expanded) {
+      cell.regionTools = document.createElement('div');
+      cell.regionTools.className = 'pdf-region-tools';
+      card.append(cell.regionTools);
+    }
     cells.set(card, cell);
     return cell;
+  }
+
+  function showAddress(cell, address) {
+    cell.address = address;
+    release(cell, true);
+    cell.failed = false;
+    enqueue(cell);
+  }
+
+  function mountRegionTools(cell, manifest, region, regions) {
+    const tools = cell.regionTools;
+    tools.replaceChildren();
+    if (region) {
+      const label = document.createElement('span');
+      label.textContent = region.name;
+      const source = document.createElement('button');
+      source.className = 'button small secondary';
+      source.textContent = 'Show source page';
+      source.onclick = () => showAddress(cell, { documentId: manifest.document_id,
+        profileId: manifest.profile_id, pageNumber: manifest.page_number });
+      tools.append(label, source);
+    } else if (onSaveRegion && onDeleteRegion) {
+      cell.disposeEditor = createRegionEditor({ host: tools, view: cell.view,
+        manifestId: manifest.id, regions, onSave: onSaveRegion, onDelete: onDeleteRegion,
+        onShow: region => showAddress(cell, { regionId: region.id }) });
+    }
   }
 
   function closePopup() {
@@ -260,7 +303,7 @@ export function createPdfPageCells({ resolvePage, readRange, onOpen, width = 320
         const { document: sourceDocument } = await resolvePage(cell.address);
         if (disposed || cell.removed || generation !== cell.generation) return;
         closePopup();
-        await onOpen(sourceDocument, cell.address.pageNumber);
+        await onOpen(sourceDocument, cell.pageNumber);
       } catch (error) {
         if (!disposed && !origin.removed) (cell.removed ? origin.status : cell.status).textContent = error.message;
       } finally {

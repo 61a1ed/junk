@@ -67,8 +67,7 @@ function manifestRow(id, profileId, pageNumber) {
     WHERE document_id = ? AND profile_id = ? AND page_number = ?`, [id, profileId, pageNumber]);
   if (!manifest) return null;
   manifest.chunks = rows(`SELECT chunk_number FROM page_dependencies
-    WHERE document_id = ? AND profile_id = ? AND page_number = ? ORDER BY chunk_number`,
-  [id, profileId, pageNumber]).map(row => row.chunk_number);
+    WHERE page_manifest_id = ? ORDER BY chunk_number`, [manifest.id]).map(row => row.chunk_number);
   return manifest;
 }
 
@@ -169,8 +168,9 @@ function saveManifest({ id, profileId, profile, result }) {
       (document_id, profile_id, page_number, page_count, width, height, rotation, pixel_sha256, observed_bytes)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, profileId, result.pageNumber, result.pageCount, result.width, result.height, result.rotation, result.pixelSha256, observedBytes]);
-    const insert = db.prepare('INSERT INTO page_dependencies VALUES (?, ?, ?, ?)');
-    try { for (const chunk of chunks) insert.run([id, profileId, result.pageNumber, chunk]); }
+    const manifestId = one('SELECT last_insert_rowid() AS id').id;
+    const insert = db.prepare('INSERT INTO page_dependencies VALUES (?, ?)');
+    try { for (const chunk of chunks) insert.run([manifestId, chunk]); }
     finally { insert.free(); }
   });
   return { manifest: manifestRow(id, profileId, result.pageNumber) };
@@ -226,14 +226,44 @@ async function handle(action, payload = {}) {
     }
     case 'read-range': return readRange(payload);
     case 'page-source': {
-      validateProfileId(payload.profileId);
-      const document = documentRow(payload.id);
-      validatePage(payload.pageNumber, document.page_count);
-      const manifest = one(`SELECT width, height, rotation FROM page_manifests
-        WHERE document_id = ? AND profile_id = ? AND page_number = ?`,
-      [payload.id, payload.profileId, payload.pageNumber]);
+      let manifest, region = null;
+      if (payload.regionId !== undefined) {
+        region = one('SELECT * FROM page_regions WHERE id = ?', [payload.regionId]);
+        if (!region) throw new Error('Region no longer exists.');
+        region.bounds = JSON.parse(region.bounds);
+        manifest = one('SELECT * FROM page_manifests WHERE id = ?', [region.page_manifest_id]);
+      } else {
+        validateProfileId(payload.profileId);
+        const document = documentRow(payload.id);
+        validatePage(payload.pageNumber, document.page_count);
+        manifest = one(`SELECT * FROM page_manifests
+          WHERE document_id = ? AND profile_id = ? AND page_number = ?`,
+        [payload.id, payload.profileId, payload.pageNumber]);
+      }
       if (!manifest) throw new Error('No completed trace for this page and profile.');
-      return { document, manifest };
+      const document = documentRow(manifest.document_id);
+      const regions = rows('SELECT * FROM page_regions WHERE page_manifest_id = ? ORDER BY id', [manifest.id])
+        .map(row => ({ ...row, bounds: JSON.parse(row.bounds) }));
+      return { document, manifest, region, regions };
+    }
+    case 'save-region': {
+      const { pageManifestId, bounds } = payload;
+      const name = typeof payload.name === 'string' ? payload.name.trim() : '';
+      if (!name || name.length > 200) throw new Error('Enter a region name (up to 200 characters).');
+      if (!Number.isSafeInteger(pageManifestId) || !one('SELECT id FROM page_manifests WHERE id = ?', [pageManifestId])) {
+        throw new Error('Page manifest no longer exists.');
+      }
+      if (!Array.isArray(bounds) || bounds.length !== 4 || !bounds.every(Number.isFinite) ||
+          bounds[0] >= bounds[2] || bounds[1] >= bounds[3]) throw new Error('Expected bounds [xmin, ymin, xmax, ymax] with positive area.');
+      db.run('INSERT INTO page_regions (name, page_manifest_id, bounds) VALUES (?, ?, ?)',
+        [name, pageManifestId, JSON.stringify(bounds)]);
+      const region = one('SELECT * FROM page_regions WHERE id = last_insert_rowid()');
+      return { ...region, bounds: JSON.parse(region.bounds) };
+    }
+    case 'delete-region': {
+      if (!Number.isSafeInteger(payload.regionId)) throw new Error('Invalid region ID.');
+      db.run('DELETE FROM page_regions WHERE id = ?', [payload.regionId]);
+      return { deleted: true };
     }
     case 'save-manifest': return saveManifest(payload);
     case 'manifest': {

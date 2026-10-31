@@ -313,7 +313,7 @@ try {
   await page.locator('#schema-reference > summary').click();
   await visible('.schema-card');
   assert.equal(await page.getByRole('textbox', { name: 'SQL query' }).isVisible(), true);
-  assert.equal(await page.locator('.schema-card').count(), 6);
+  assert.equal(await page.locator('.schema-card').count(), 7);
   await page.getByText('View CREATE TABLE statement', { exact: true }).first().click();
   assert.match(await page.locator('.schema-card details').first().textContent(), /CREATE TABLE/);
   await page.locator('#schema-reference > summary').click();

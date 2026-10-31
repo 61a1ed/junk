@@ -101,7 +101,7 @@ export function makeFixturePdf({
 }
 
 /** Small reading fixture with portrait, landscape, then portrait letter pages. */
-export function makeReadingFixturePdf() {
+export function makeReadingFixturePdf({ rotation = 0, origin = [0, 0] } = {}) {
   const dimensions = [[612, 792], [792, 612], [612, 792]];
   const objects = new Map([
     [1, ascii("<< /Type /Catalog /Pages 2 0 R >>")],
@@ -109,7 +109,7 @@ export function makeReadingFixturePdf() {
   ]);
   dimensions.forEach(([width, height], index) => {
     const pageObject = 3 + index * 2;
-    objects.set(pageObject, ascii(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Contents ${pageObject + 1} 0 R >>`));
+    objects.set(pageObject, ascii(`<< /Type /Page /Parent 2 0 R /MediaBox [${origin[0]} ${origin[1]} ${width + origin[0]} ${height + origin[1]}] /Rotate ${rotation} /Contents ${pageObject + 1} 0 R >>`));
     const lines = [
       `Reading preview - page ${index + 1}`,
       "",

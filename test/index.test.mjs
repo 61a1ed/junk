@@ -1,9 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { createCanvas } from '@napi-rs/canvas';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import {
@@ -14,28 +11,36 @@ import { makeFixturePdf, makeIncrementalFixturePdf, makeObjectStreamFixturePdf }
 import { pdfjsAssetDirectory } from '../pdfjs-assets.mjs';
 import { encodePdfAddress } from '../public/pdf-address.js';
 
-await test('page refs are generated and older databases gain them without retracing', async () => {
-  const directory = mkdtempSync(path.join(tmpdir(), 'pdf-ref-'));
-  const filename = path.join(directory, 'pages.sqlite');
-  let db = openDatabase(filename);
+await test('page refs, regions and dependencies use manifest IDs and cascade on replacement/deletion', async () => {
+  const db = openDatabase(':memory:');
   try {
     const id = putDocument(db, makeFixturePdf());
-    const traced = await indexPage(db, id, 2);
-    const expected = encodePdfAddress({ documentId: id, profileId: PROFILE_ID, pageNumber: 2 });
-    const read = () => db.prepare('SELECT ref, pixel_sha256 FROM page_manifests').get();
-    assert.equal(read().ref, expected);
+    await indexPage(db, id, 2);
+    const manifest = db.prepare('SELECT * FROM page_manifests').get();
+    assert.equal(manifest.ref, encodePdfAddress({ documentId: id, profileId: PROFILE_ID, pageNumber: 2 }));
     assert.throws(() => db.prepare("UPDATE page_manifests SET ref = 'incorrect'").run(), /generated column/);
-    // Simulate a pre-ref database, retaining the original trace and chunks.
-    db.exec('ALTER TABLE page_manifests DROP COLUMN ref');
-    db.close();
-    db = openDatabase(filename);
-    assert.equal(read().ref, expected);
-    assert.equal(read().pixel_sha256, traced.pixelSha256);
-    assert.equal(db.prepare('PRAGMA table_xinfo(page_manifests)').all().find(c => c.name === 'ref').hidden, 2);
-  } finally {
-    db.close();
-    rmSync(directory, { recursive: true, force: true });
-  }
+    const insert = db.prepare('INSERT INTO page_regions(name, page_manifest_id, bounds) VALUES (?, ?, ?)');
+    for (const bounds of ['[0,0,0,5]', '[5,0,2,5]', '[0,0,null,5]', '[0,0,"5",5]', '[0,0,5]', '{}']) {
+      assert.throws(() => insert.run('bad', manifest.id, bounds));
+    }
+    assert.throws(() => insert.run('', manifest.id, '[0,0,5,5]'));
+    assert.throws(() => insert.run('orphan', manifest.id + 100, '[0,0,5,5]'));
+    insert.run('first', manifest.id, '[0,0,50,50]');
+    const region = db.prepare('SELECT * FROM page_regions').get();
+    assert.equal(region.ref, `pdf:region:v1:${region.id}`);
+    assert.deepEqual(JSON.parse(region.bounds), [0, 0, 50, 50]);
+    await indexPage(db, id, 2);
+    const replacement = db.prepare('SELECT id FROM page_manifests').get().id;
+    assert.notEqual(replacement, manifest.id);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM page_regions').get().n, 0);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM page_dependencies WHERE page_manifest_id = ?').get(manifest.id).n, 0);
+    insert.run('second', replacement, '[0,0,50,50]');
+    db.prepare('DELETE FROM documents WHERE document_id = ?').run(id);
+    for (const table of ['page_manifests', 'page_dependencies', 'page_regions']) {
+      assert.equal(db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n, 0);
+    }
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+  } finally { db.close(); }
 });
 
 async function fullFilePixelHash(bytes, pageNumber) {
@@ -113,8 +118,8 @@ await test('cold manifests are narrow, replay without fallback, and match full-f
 
     // A missing non-bootstrap dependency must cause a real replay failure.
     const needed = page2.chunks.find(n => n !== 0);
-    db.prepare(`DELETE FROM page_dependencies WHERE document_id = ? AND
-      profile_id = ? AND page_number = 2 AND chunk_number = ?`).run(id, PROFILE_ID, needed);
+    db.prepare(`DELETE FROM page_dependencies WHERE page_manifest_id =
+      (SELECT id FROM page_manifests WHERE document_id = ? AND profile_id = ? AND page_number = 2) AND chunk_number = ?`).run(id, PROFILE_ID, needed);
     await assert.rejects(verifyPage(db, id, 2), /Manifest miss/);
   } finally { db.close(); }
 });

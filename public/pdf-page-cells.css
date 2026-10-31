@@ -67,3 +67,27 @@ body:has(.pdf-page-popup[open]) { overflow: hidden; }
 }
 .pdf-page-popup .pdf-cell-stage:empty::before { content: none; }
 .pdf-page-popup .pdfViewer .page { margin: auto; flex: none; }
+
+.pdf-region-crop {
+  position: relative;
+  overflow: hidden;
+  flex: none;
+  margin: auto;
+  background: white;
+  direction: ltr;
+}
+.pdf-region-crop canvas { display: block; }
+.pdf-region-tools { height: 104px; flex: none; overflow: auto; padding: 8px 0; }
+.pdf-region-tools > button { margin-left: 12px; }
+.pdf-region-controls, .pdf-region-form, .pdf-region-list, .pdf-region-item {
+  display: flex; align-items: center; gap: 8px;
+}
+.pdf-region-controls { flex-wrap: wrap; }
+.pdf-region-form input { padding: 6px; border: 1px solid #bac9ba; border-radius: 4px; }
+.pdf-region-status { font-size: 11px; color: #53674e; }
+.pdf-region-list { flex-basis: 100%; flex-wrap: wrap; }
+.pdf-region-item { border: 1px solid #d3ded0; border-radius: 5px; padding: 3px; }
+.pdf-region-overlay { position: absolute; inset: 0; z-index: 5; pointer-events: none; overflow: hidden; }
+.pdf-region-overlay.selecting { pointer-events: auto; cursor: crosshair; touch-action: none; user-select: none; }
+.pdf-region-box { position: absolute; border: 2px solid #3b8259; background: #4b9a6818; pointer-events: none; }
+.pdf-region-box.draft { border-style: dashed; border-color: #2767c4; background: #2767c420; }

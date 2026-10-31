@@ -325,8 +325,16 @@ export async function readDocumentRange(id, begin, end) {
   return bytes;
 }
 
-export function getTracedPageSource({ documentId, profileId, pageNumber }) {
-  return rpc('page-source', { id: documentId, profileId, pageNumber });
+export function getTracedPageSource({ documentId, profileId, pageNumber, regionId }) {
+  return rpc('page-source', { id: documentId, profileId, pageNumber, regionId });
+}
+
+export function savePageRegion(payload) {
+  return mutate('Saving page region', () => rpc('save-region', payload));
+}
+
+export function deletePageRegion(regionId) {
+  return mutate('Deleting page region', () => rpc('delete-region', { regionId }));
 }
 
 // The interface intentionally mirrors the UI's former routes without performing

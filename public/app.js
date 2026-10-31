@@ -1,4 +1,4 @@
-import { clientRequest, getDocumentBytes, readDocumentRange, getTracedPageSource } from './client-db.js';
+import { clientRequest, getDocumentBytes, readDocumentRange, getTracedPageSource, savePageRegion, deletePageRegion } from './client-db.js';
 import { createReader } from './reader-shell.js';
 import { renderSqlResults } from './sql-results.js';
 import { createPdfPageCells, PDF_PAGE_WIDTHS } from './pdf-page-cells.js';
@@ -36,9 +36,10 @@ async function openReader() {
 }
 const presets = {
   pages: "SELECT u.filename, m.page_number, m.ref AS pdf_page\nFROM page_manifests m\nJOIN upload_metadata u USING (document_id)\nORDER BY u.filename, m.page_number;",
+  regions: 'SELECT r.name, r.bounds, r.ref AS pdf_region, m.page_number\nFROM page_regions r\nJOIN page_manifests m ON m.id = r.page_manifest_id\nORDER BY r.id;',
   documents: 'SELECT d.document_id, u.filename, d.byte_length,\n       d.chunk_size, u.page_count, d.created_at\nFROM documents d\nJOIN upload_metadata u USING (document_id)\nORDER BY d.created_at DESC;',
   manifests: 'SELECT page_number, page_count, width, height,\n       observed_bytes, pixel_sha256\nFROM page_manifests\nORDER BY document_id, page_number;',
-  dependencies: 'SELECT document_id, page_number, chunk_number\nFROM page_dependencies\nORDER BY document_id, page_number, chunk_number;',
+  dependencies: 'SELECT m.document_id, m.page_number, d.chunk_number\nFROM page_dependencies d\nJOIN page_manifests m ON m.id = d.page_manifest_id\nORDER BY m.document_id, m.page_number, d.chunk_number;',
   storage: 'SELECT u.filename, COUNT(*) AS chunks,\n       SUM(length(c.data)) AS stored_bytes\nFROM document_chunks c\nJOIN upload_metadata u USING (document_id)\nGROUP BY c.document_id;'
 };
 async function api(path, options = {}) {
@@ -391,6 +392,8 @@ async function runQuery() {
       width: pageCellWidth,
       resolvePage: getTracedPageSource,
       readRange: readDocumentRange,
+      onSaveRegion: savePageRegion,
+      onDeleteRegion: deletePageRegion,
       onOpen: (sourceDocument, pageNumber) => reader.open(sourceDocument, pageNumber),
     });
     const disposeTable = renderSqlResults($('#query-results'), result, ({ container, column, value }) => {

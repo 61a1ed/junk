@@ -17,3 +17,10 @@ test('invalid or ambiguous SQL coordinates cannot become page requests', () => {
     assert.throws(() => decodePdfAddress(value), /Expected pdf:v1/, String(value));
   }
 });
+
+test('region references resolve only positive safe integer IDs', () => {
+  assert.deepEqual(decodePdfAddress('pdf:region:v1:12'), { regionId: 12 });
+  for (const value of ['0', '-1', '01', '1.5', '1e2', '9007199254740992', '1\n', '1:2']) {
+    assert.throws(() => decodePdfAddress(`pdf:region:v1:${value}`));
+  }
+});
